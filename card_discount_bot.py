@@ -10,7 +10,14 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-web-security",
+                "--disable-font-subpixel-positioning",
+                "--font-render-hinting=none",
+            ],
         )
         page = await browser.new_page(
             viewport={"width": 1280, "height": 900},
@@ -25,132 +32,99 @@ async def main():
         try:
             await page.goto(
                 "https://www.lotteimall.com/",
-                wait_until="domcontentloaded", timeout=40000,
+                wait_until="domcontentloaded",
+                timeout=40000,
             )
         except Exception as e:
             print(f"  goto 예외 무시: {e}")
-        await asyncio.sleep(5)
+        await asyncio.sleep(6)
 
         os.makedirs("screenshots", exist_ok=True)
-        await page.screenshot(path="screenshots/lotte_main.png", full_page=False)
-        print(f"메인 스크린샷 저장 / URL: {page.url}")
 
-        # 팝업 닫기 시도
+        # 폰트 로딩 무시하고 스크린샷
+        try:
+            await page.screenshot(
+                path="screenshots/lotte_main.png",
+                full_page=False,
+                timeout=60000,
+            )
+            print(f"메인 스크린샷 저장 / URL: {page.url}")
+        except Exception as e:
+            print(f"스크린샷 오류 (무시): {e}")
+
+        # 팝업 닫기
         print("\n팝업 닫기 시도...")
         for selector in [
-            "[aria-label='닫기']",
-            "button[class*='close']",
-            "button[class*='Close']",
-            ".btn_close",
-            ".pop_close",
-            "[class*='popup'] button",
+            ".btn_close", ".pop_close", "[class*='close']",
+            "[aria-label='닫기']", "button[class*='Close']",
         ]:
             try:
-                el = await page.query_selector(selector)
-                if el:
-                    await el.click(force=True)
-                    print(f"  팝업 닫기: {selector}")
-                    await asyncio.sleep(1)
+                els = await page.query_selector_all(selector)
+                for el in els:
+                    if await el.is_visible():
+                        await el.click(force=True)
+                        print(f"  닫기: {selector}")
+                        await asyncio.sleep(0.5)
             except Exception:
                 pass
 
-        await page.screenshot(path="screenshots/lotte_no_popup.png", full_page=False)
-
-        # "카드 청구할인" 영역 찾기
+        # "카드" "청구할인" 관련 텍스트 탐색
         print("\n카드 청구할인 영역 탐색...")
         card_info = await page.evaluate("""
             () => {
                 const results = [];
                 document.querySelectorAll('*').forEach(el => {
-                    const text = el.innerText?.trim();
-                    if (text && (
+                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
+                    if (text && text.length < 100 && (
                         text.includes('카드 청구할인') ||
                         text.includes('청구할인') ||
-                        text.includes('카드할인')
-                    ) && text.length < 200) {
+                        (text.includes('%') && text.includes('카드'))
+                    )) {
                         const rect = el.getBoundingClientRect();
-                        results.push({
-                            tag: el.tagName,
-                            cls: el.className?.toString().slice(0, 60),
-                            text: text.slice(0, 80),
-                            x: Math.round(rect.left + rect.width / 2),
-                            y: Math.round(rect.top + rect.height / 2),
-                            width: Math.round(rect.width),
-                            height: Math.round(rect.height),
-                        });
-                    }
-                });
-                return results.slice(0, 20);
-            }
-        """)
-        print(f"카드 청구할인 관련 요소 {len(card_info)}개:")
-        for el in card_info:
-            print(f"  [{el['tag']}] text='{el['text']}' x={el['x']} y={el['y']} w={el['width']} cls={el['cls'][:40]}")
-
-        # 오늘 카드 클릭 가능 요소 찾기
-        print("\n오늘 카드 클릭 요소 탐색...")
-        today_cards = await page.evaluate("""
-            () => {
-                const results = [];
-                document.querySelectorAll('*').forEach(el => {
-                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
-                    if (text && text.includes('청구할인') && text.includes('%') && text.length < 50) {
-                        const rect = el.getBoundingClientRect();
-                        const style = window.getComputedStyle(el);
-                        if (rect.width > 30 && rect.height > 30) {
+                        if (rect.width > 0 && rect.height > 0) {
                             results.push({
                                 tag: el.tagName,
                                 cls: el.className?.toString().slice(0, 60),
-                                text,
+                                text: text.slice(0, 80),
                                 x: Math.round(rect.left + rect.width / 2),
                                 y: Math.round(rect.top + rect.height / 2),
-                                cursor: style.cursor,
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height),
                                 href: el.href || ''
                             });
                         }
                     }
                 });
-                return results.slice(0, 10);
+                return results.slice(0, 20);
             }
         """)
-        print(f"오늘 카드 요소 {len(today_cards)}개:")
-        for el in today_cards:
-            print(f"  [{el['tag']}] '{el['text']}' x={el['x']} y={el['y']} cursor={el['cursor']} href={el['href'][:60]}")
+        print(f"카드 관련 요소 {len(card_info)}개:")
+        for el in card_info:
+            print(f"  [{el['tag']}] '{el['text']}' x={el['x']} y={el['y']} href={el['href'][:60]}")
 
-        # 첫 번째 카드 클릭 시도
-        if today_cards:
-            target = today_cards[0]
-            print(f"\n첫 번째 카드 클릭: ({target['x']}, {target['y']})")
-            await page.mouse.click(target['x'], target['y'])
+        # 전체 텍스트에서 카드 섹션 찾기
+        full_text = await page.evaluate("() => document.body.innerText")
+        if '청구할인' in full_text:
+            idx = full_text.find('청구할인')
+            print(f"\n청구할인 주변 텍스트:\n{full_text[max(0,idx-100):idx+300]}")
+
+        # 첫 번째 카드 클릭
+        if card_info:
+            target = card_info[0]
+            print(f"\n첫 번째 카드 클릭: ({target['x']}, {target['y']}) - '{target['text']}'")
+
+            if target['href'] and 'lotteimall' in target['href']:
+                await page.goto(target['href'], wait_until="domcontentloaded", timeout=20000)
+            else:
+                await page.mouse.click(target['x'], target['y'])
             await asyncio.sleep(3)
             print(f"클릭 후 URL: {page.url}")
-            await page.screenshot(path="screenshots/lotte_after_click.png", full_page=False)
 
-            # 탭 구조 확인
-            tabs = await page.evaluate("""
-                () => {
-                    const results = [];
-                    document.querySelectorAll('a, button, li').forEach(el => {
-                        const text = el.innerText?.trim().replace(/\\s+/g, ' ');
-                        if (text && text.includes('%') && text.length < 30) {
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {
-                                results.push({
-                                    tag: el.tagName,
-                                    text,
-                                    x: Math.round(rect.left + rect.width / 2),
-                                    y: Math.round(rect.top + rect.height / 2),
-                                    cls: el.className?.toString().slice(0, 50)
-                                });
-                            }
-                        }
-                    });
-                    return results;
-                }
-            """)
-            print(f"\n클릭 후 탭 목록 ({len(tabs)}개):")
-            for t in tabs:
-                print(f"  [{t['tag']}] '{t['text']}' x={t['x']} y={t['y']} cls={t['cls'][:40]}")
+            try:
+                await page.screenshot(path="screenshots/lotte_after_click.png", timeout=60000)
+                print("클릭 후 스크린샷 저장")
+            except Exception as e:
+                print(f"스크린샷 오류: {e}")
 
             content = await page.evaluate("() => document.body.innerText.slice(0, 500)")
             print(f"\n페이지 텍스트:\n{content}")
