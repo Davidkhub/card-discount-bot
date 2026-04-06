@@ -2,6 +2,7 @@
 import asyncio
 import smtplib
 import os
+import re
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -63,7 +64,7 @@ async def capture_cj(browser):
 
 async def capture_hmall(context):
     page = await context.new_page()
-    results = []  # {"card_name": ..., "path": ...}
+    results = []
 
     try:
         print("[Hmall] 접속 중...")
@@ -102,11 +103,22 @@ async def capture_hmall(context):
         except Exception as e:
             print(f"  혜택 탭 클릭 실패: {e}")
 
-        # 카드 섹션으로 스크롤
+        # 카드 섹션 스크롤
         await page.evaluate("window.scrollTo(0, 900)")
         await asyncio.sleep(2)
 
-        # 오늘 카드 요소들 찾기
+        # 오늘 카드 수 파악
+        full_text = await page.evaluate("() => document.body.innerText")
+        today_count = 1
+        match = re.search(
+            r"오늘\s*[\d.]+\s*\([월화수목금토일]\)(.*?)(?=\d{2}\.\d{2}\s*\([월화수목금토일]\)|오늘의 간편결제)",
+            full_text, re.DOTALL
+        )
+        if match:
+            today_count = match.group(1).count("즉시할인")
+            print(f"  오늘 카드 수: {today_count}개")
+
+        # 카드 요소 좌표 수집
         card_elements = await page.evaluate("""
             () => {
                 const results = [];
@@ -123,8 +135,7 @@ async def capture_hmall(context):
                         results.push({
                             x: Math.round(rect.left + rect.width / 2),
                             y: Math.round(rect.top + rect.height / 2),
-                            text: parent?.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 40),
-                            inViewport: rect.top >= 0 && rect.top <= 844
+                            text: parent?.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 40)
                         });
                     }
                 });
@@ -132,90 +143,79 @@ async def capture_hmall(context):
             }
         """)
 
-        # 오늘 날짜 카드만 (앞쪽 inViewport 카드들)
-        # 텍스트에서 "오늘" 섹션 카드 수 파악 - 첫 번째 날짜 변경 전까지
-        today_cards = []
-        full_text = await page.evaluate("() => document.body.innerText")
-        import re
-        match = re.search(r"오늘\s*[\d.]+\s*\([월화수목금토일]\)(.*?)(?=\d{2}\.\d{2}\s*\([월화수목금토일]\)|오늘의 간편결제)", full_text, re.DOTALL)
-        today_count = 1
-        if match:
-            today_text = match.group(1)
-            today_count = today_text.count("즉시할인")
-            print(f"  오늘 카드 수: {today_count}개")
-
         today_cards = card_elements[:today_count]
-        print(f"  처리할 카드: {[c['text'] for c in today_cards]}")
+        print(f"  오늘 카드 목록: {[c['text'] for c in today_cards]}")
 
-        # 각 카드 클릭 → 상세 페이지 스크린샷
+        # ── 핵심: 각 카드 URL을 먼저 모두 수집 ──
+        card_urls = []
         for i, card in enumerate(today_cards):
-            card_name = card['text'].replace(' 즉시할인', '').strip()
-            print(f"\n  [{i+1}/{len(today_cards)}] '{card_name}' 클릭...")
-
+            print(f"\n  [{i+1}] URL 수집: '{card['text']}'")
+            await page.mouse.click(card['x'], card['y'])
+            await asyncio.sleep(3)
+            url = page.url
+            print(f"       URL: {url}")
+            if url and 'dpl/index' not in url:
+                card_name = card['text'].replace('즉시할인', '').replace('%', '').strip()
+                # 숫자만 추출해서 카드명+할인율 조합
+                pct_match = re.search(r'\d+', card['text'])
+                pct = pct_match.group() + "%" if pct_match else ""
+                card_urls.append({"name": card_name, "pct": pct, "url": url})
+            # 뒤로가기
+            await page.go_back(wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(3)
+            await page.evaluate(
+                "() => { document.querySelectorAll('[role=\"dialog\"], #modal-root > *').forEach(el => el.remove()); }"
+            )
+            # 혜택 탭 재클릭
             try:
-                await page.mouse.click(card['x'], card['y'])
-                await asyncio.sleep(3)
-
-                detail_url = page.url
-                print(f"  이동 URL: {detail_url}")
-
-                if 'crdDmndDcPrmo' in detail_url or detail_url != "https://www.hmall.com/md/dpl/index":
-                    # 상세 페이지 스크린샷 (전체)
-                    path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
-                    await page.screenshot(path=path, full_page=True)
-                    print(f"  스크린샷 저장: {path}")
-                    results.append({"card_name": card_name, "path": path})
-
-                    # 뒤로가기 후 원래 페이지 복원
-                    await page.go_back(wait_until="domcontentloaded", timeout=15000)
+                el = await page.query_selector("[data-maindispseq='7']")
+                if el:
+                    await el.click(force=True)
                     await asyncio.sleep(3)
-
-                    # 팝업 재제거
-                    await page.evaluate(
-                        "() => { document.querySelectorAll('[role=\"dialog\"], #modal-root > *').forEach(el => el.remove()); }"
-                    )
-
-                    # 혜택 탭 재클릭
-                    try:
-                        el = await page.query_selector("[data-maindispseq='7']")
-                        if el:
-                            await el.click(force=True)
-                            await asyncio.sleep(3)
-                    except Exception:
-                        pass
-
-                    # 카드 섹션 재스크롤
-                    await page.evaluate("window.scrollTo(0, 900)")
-                    await asyncio.sleep(2)
-
-                    # 요소 재탐색
-                    card_elements = await page.evaluate("""
-                        () => {
-                            const results = [];
-                            document.querySelectorAll('*').forEach(el => {
-                                if (el.innerText?.trim() === '즉시할인') {
-                                    let parent = el;
-                                    for (let i = 0; i < 10; i++) {
-                                        parent = parent.parentElement;
-                                        if (!parent) break;
-                                        const style = window.getComputedStyle(parent);
-                                        if (style.cursor === 'pointer') break;
-                                    }
-                                    const rect = parent ? parent.getBoundingClientRect() : el.getBoundingClientRect();
-                                    results.push({
-                                        x: Math.round(rect.left + rect.width / 2),
-                                        y: Math.round(rect.top + rect.height / 2),
-                                        text: parent?.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 40)
-                                    });
-                                }
+            except Exception:
+                pass
+            await page.evaluate("window.scrollTo(0, 900)")
+            await asyncio.sleep(2)
+            # 요소 재탐색
+            card_elements = await page.evaluate("""
+                () => {
+                    const results = [];
+                    document.querySelectorAll('*').forEach(el => {
+                        if (el.innerText?.trim() === '즉시할인') {
+                            let parent = el;
+                            for (let i = 0; i < 10; i++) {
+                                parent = parent.parentElement;
+                                if (!parent) break;
+                                const style = window.getComputedStyle(parent);
+                                if (style.cursor === 'pointer') break;
+                            }
+                            const rect = parent ? parent.getBoundingClientRect() : el.getBoundingClientRect();
+                            results.push({
+                                x: Math.round(rect.left + rect.width / 2),
+                                y: Math.round(rect.top + rect.height / 2),
+                                text: parent?.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 40)
                             });
-                            return results;
                         }
-                    """)
-                    today_cards = card_elements[:today_count]
+                    });
+                    return results;
+                }
+            """)
+            today_cards = card_elements[:today_count]
 
+        print(f"\n  수집된 URL {len(card_urls)}개: {[c['url'] for c in card_urls]}")
+
+        # ── 각 URL 직접 접속 → 스크린샷 ──
+        for i, card in enumerate(card_urls):
+            print(f"\n  [{i+1}] 스크린샷: {card['name']} {card['pct']}")
+            try:
+                await page.goto(card['url'], wait_until="domcontentloaded", timeout=20000)
+                await asyncio.sleep(3)
+                path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
+                await page.screenshot(path=path, full_page=True)
+                print(f"       저장: {path}")
+                results.append({"card_name": f"{card['name']} {card['pct']}", "path": path})
             except Exception as e:
-                print(f"  오류: {e}")
+                print(f"       오류: {e}")
 
         return results
 
@@ -239,43 +239,41 @@ def send_email(cj_path, hmall_results):
 
     cid_map = {}
 
-    # CJ온스타일 블록
     if cj_path and os.path.exists(cj_path):
         cid_map["cj"] = ("img_cj", cj_path)
         cj_block = '<img src="cid:img_cj" style="max-width:100%;border:1px solid #eee;border-radius:8px;display:block;">'
     else:
         cj_block = '<p style="color:#aaa;">수집 실패 - <a href="https://display.cjonstyle.com/m/homeTab/main?hmtabMenuId=H00005">직접 확인</a></p>'
 
-    # Hmall 블록
     hmall_blocks = ""
     if hmall_results:
         for i, r in enumerate(hmall_results):
             cid = f"img_hmall_{i}"
             cid_map[f"hmall_{i}"] = (cid, r["path"])
             hmall_blocks += f"""
-            <div style="margin-bottom:16px;">
-              <p style="font-size:13px;font-weight:600;color:#185FA5;margin:0 0 6px;">{r['card_name']}</p>
+            <div style="margin-bottom:20px;">
+              <p style="font-size:14px;font-weight:600;color:#185FA5;margin:0 0 8px;
+                        border-left:3px solid #185FA5;padding-left:8px;">
+                {r['card_name']}
+              </p>
               <img src="cid:{cid}" style="max-width:100%;border:1px solid #eee;border-radius:8px;display:block;">
             </div>"""
     else:
-        hmall_blocks = '<p style="color:#aaa;">수집 실패 - <a href="https://www.hmall.com/md/dpl/index">직접 확인</a></p>'
+        hmall_blocks = '<p style="color:#aaa;">수집 실패</p>'
 
     html = f"""<html><body style="font-family:'Malgun Gothic',Arial,sans-serif;
                                   max-width:700px;margin:0 auto;padding:24px;color:#333;">
       <h2 style="border-bottom:2px solid #eee;padding-bottom:12px;font-size:18px;">
         홈쇼핑 카드할인 — {today_str}({weekday})
       </h2>
-
       <h3 style="font-size:15px;border-left:4px solid #E24B4A;padding-left:10px;margin-bottom:10px;">
         CJ온스타일
       </h3>
       {cj_block}
-
       <h3 style="font-size:15px;border-left:4px solid #185FA5;padding-left:10px;margin:28px 0 10px;">
-        Hmall (현대홈쇼핑) — 오늘의 카드할인
+        Hmall — 오늘의 카드할인
       </h3>
       {hmall_blocks}
-
       <hr style="border:none;border-top:1px solid #f0f0f0;margin-top:24px;">
       <p style="font-size:11px;color:#bbb;">카드할인 봇 자동 발송</p>
     </body></html>"""
@@ -298,7 +296,6 @@ def send_email(cj_path, hmall_results):
 
 
 async def main():
-    import re
     print(f"카드할인 봇 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     async with async_playwright() as p:
