@@ -25,64 +25,94 @@ async def main():
         try:
             await page.goto(
                 "https://www.hmall.com/md/dpl/index",
-                wait_until="domcontentloaded",  # networkidle 대신 완화
+                wait_until="domcontentloaded",
                 timeout=40000,
             )
         except Exception as e:
-            print(f"goto 예외 (무시하고 계속): {e}")
+            print(f"goto 예외 무시: {e}")
 
-        await asyncio.sleep(6)
-
+        await asyncio.sleep(5)
         os.makedirs("screenshots", exist_ok=True)
-        await page.screenshot(path="screenshots/hmall_main.png")
-        print(f"현재 URL: {page.url}")
-        print("메인 스크린샷 저장")
 
-        # 카드할인 관련 링크 찾기
-        links = await page.evaluate("""
+        # 팝업 닫기 시도
+        print("팝업 닫기 시도...")
+        popup_closed = False
+        for popup_selector in [
+            "[aria-label='메인 배너 팝업'] button",
+            "[role='dialog'] button",
+            "button[class*='close']",
+            "button[class*='Close']",
+            "[aria-label='닫기']",
+            "button[class*='dismiss']",
+        ]:
+            try:
+                el = await page.query_selector(popup_selector)
+                if el:
+                    await el.click(force=True)
+                    print(f"  팝업 닫기 성공: {popup_selector}")
+                    popup_closed = True
+                    await asyncio.sleep(1)
+                    break
+            except Exception as e:
+                print(f"  {popup_selector} 실패: {e}")
+
+        # 팝업 닫기 버튼 못찾으면 Escape 키로 닫기
+        if not popup_closed:
+            print("  Escape 키로 팝업 닫기 시도...")
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(1)
+
+        # 팝업 강제 제거 (JS로)
+        print("  JS로 팝업 강제 제거...")
+        await page.evaluate("""
             () => {
-                const results = [];
-                document.querySelectorAll('a').forEach(el => {
-                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
-                    const href = el.href || '';
-                    if (text && (
-                        text.includes('카드') ||
-                        text.includes('할인') ||
-                        text.includes('혜택') ||
-                        href.includes('card') ||
-                        href.includes('dc') ||
-                        href.includes('dpl')
-                    )) {
-                        results.push({ text: text.slice(0, 60), href: href.slice(0, 100) });
-                    }
-                });
-                return results.slice(0, 30);
+                const dialogs = document.querySelectorAll('[role="dialog"], #modal-root > *');
+                dialogs.forEach(el => el.remove());
             }
         """)
+        await asyncio.sleep(1)
 
-        print(f"\n카드/할인 관련 링크:")
-        for l in links:
-            print(f"  text={l['text'][:50]} | href={l['href']}")
+        await page.screenshot(path="screenshots/hmall_no_popup.png")
+        print("팝업 제거 후 스크린샷 저장")
 
-        # 카드할인 탭 클릭 시도
-        print("\n클릭 시도...")
-        for keyword in ['카드할인', '할인&혜택', '혜택', '카드']:
+        # 카드할인 탭 클릭
+        print("\n카드할인 탭 클릭 시도...")
+        clicked = False
+        for keyword in ['카드할인', '혜택', '카드']:
             try:
                 locator = page.get_by_text(keyword, exact=False).first
                 count = await locator.count()
                 if count > 0:
-                    await locator.click(timeout=5000)
+                    await locator.click(force=True, timeout=5000)
                     print(f"  클릭 성공: '{keyword}'")
+                    clicked = True
                     await asyncio.sleep(4)
                     print(f"  클릭 후 URL: {page.url}")
                     await page.screenshot(path="screenshots/hmall_after_click.png")
                     print("  클릭 후 스크린샷 저장")
 
-                    content = await page.evaluate("() => document.body.innerText.slice(0, 1500)")
-                    print(f"\n  페이지 텍스트:\n{content}")
+                    content = await page.evaluate("() => document.body.innerText.slice(0, 2000)")
+                    print(f"\n페이지 텍스트:\n{content}")
                     break
             except Exception as e:
                 print(f"  '{keyword}' 실패: {e}")
+
+        if not clicked:
+            # 직접 URL로 접근 시도
+            print("\n직접 URL 접근 시도...")
+            try:
+                await page.goto(
+                    "https://www.hmall.com/md/app/main/index?mainDispSeq=7&mblMainTmplGbcd=07",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                await asyncio.sleep(4)
+                print(f"  URL: {page.url}")
+                await page.screenshot(path="screenshots/hmall_direct.png")
+                content = await page.evaluate("() => document.body.innerText.slice(0, 2000)")
+                print(f"\n페이지 텍스트:\n{content}")
+            except Exception as e:
+                print(f"  직접 URL 접근 실패: {e}")
 
         await browser.close()
         print("\n디버그 완료")
