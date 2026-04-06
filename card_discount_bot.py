@@ -4,7 +4,7 @@ import os
 from playwright.async_api import async_playwright
 
 async def main():
-    print("롯데홈쇼핑 클릭 후 레이어 텍스트 수집")
+    print("롯데홈쇼핑 스크롤 후 클릭 디버그")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -47,107 +47,85 @@ async def main():
             except Exception:
                 pass
 
-        # 카드 섹션 클릭
-        section_cards = await page.evaluate("""
-            () => {
-                const section = document.querySelector("[class*='f_bnr_card_prom']");
-                if (!section) return [];
-                const results = [];
-                section.querySelectorAll('*').forEach(el => {
-                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
-                    if (text && text.includes('청구할인') && text.includes('%') && text.length < 30) {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 30 && rect.height > 30) {
-                            results.push({
-                                tag: el.tagName, text,
-                                x: Math.round(rect.left + rect.width / 2),
-                                y: Math.round(rect.top + rect.height / 2),
+        # 카드 섹션으로 스크롤 후 클릭
+        section = await page.query_selector("[class*='f_bnr_card_prom']")
+        if section:
+            await section.scroll_into_view_if_needed()
+            await asyncio.sleep(2)
+
+            # 스크롤 후 좌표 재계산
+            card_link = await page.query_selector("[class*='f_bnr_card_prom'] a")
+            if card_link:
+                box = await card_link.bounding_box()
+                print(f"카드 링크 위치: {box}")
+
+                # 새 탭 감지하면서 클릭
+                print("\n새 탭 감지하면서 클릭...")
+                try:
+                    async with context.expect_page(timeout=8000) as new_page_info:
+                        await card_link.click()
+                    new_page = await new_page_info.value
+                    await new_page.wait_for_load_state("domcontentloaded")
+                    await asyncio.sleep(4)
+                    print(f"  새 탭 URL: {new_page.url}")
+
+                    # 탭 목록 수집
+                    tabs = await new_page.evaluate("""
+                        () => {
+                            const results = [];
+                            document.querySelectorAll('a, button, li').forEach(el => {
+                                const text = el.innerText?.trim().replace(/\\s+/g, ' ');
+                                if (text && text.length < 20 && (
+                                    text.includes('롯데') || text.includes('KB') ||
+                                    text.includes('현대') || text.includes('카드')
+                                )) {
+                                    const rect = el.getBoundingClientRect();
+                                    if (rect.width > 30 && rect.height > 10) {
+                                        results.push({
+                                            tag: el.tagName, text,
+                                            x: Math.round(rect.left + rect.width/2),
+                                            y: Math.round(rect.top + rect.height/2),
+                                            cls: el.className?.toString().slice(0, 50)
+                                        });
+                                    }
+                                }
                             });
+                            return results;
                         }
-                    }
-                });
-                return results;
-            }
-        """)
+                    """)
+                    print(f"  탭 목록 {len(tabs)}개:")
+                    for t in tabs:
+                        print(f"    [{t['tag']}] '{t['text']}' x={t['x']} y={t['y']}")
 
-        if not section_cards:
-            print("카드 섹션 못 찾음")
-            await browser.close()
-            return
+                    content = await new_page.evaluate("() => document.body.innerText.slice(0, 500)")
+                    print(f"\n  페이지 텍스트:\n{content}")
 
-        target = section_cards[0]
-        print(f"\n카드 클릭: '{target['text']}'")
-        await page.mouse.click(target['x'], target['y'])
-        await asyncio.sleep(3)
-        print(f"클릭 후 URL: {page.url}")
-
-        # 클릭 후 DOM 변화 확인 - 새로 생긴 요소 찾기
-        print("\n클릭 후 DOM 탐색...")
-
-        # 전체 페이지 텍스트에서 카드 정보 찾기
-        full_text = await page.evaluate("() => document.body.innerText")
-        if "현대카드" in full_text:
-            idx = full_text.find("현대카드")
-            print(f"현대카드 발견! 주변 텍스트:\n{full_text[max(0,idx-200):idx+300]}")
-        else:
-            print("현대카드 텍스트 없음")
-
-        # 새로 추가된 레이어/모달 찾기
-        new_elements = await page.evaluate("""
-            () => {
-                const results = [];
-                document.querySelectorAll('*').forEach(el => {
-                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
-                    if (text && (text.includes('현대카드') || text.includes('롯데카드')) && text.length < 500) {
-                        const rect = el.getBoundingClientRect();
-                        const style = window.getComputedStyle(el);
-                        if (rect.width > 100 && style.display !== 'none' && style.visibility !== 'hidden') {
-                            results.push({
-                                tag: el.tagName,
-                                cls: el.className?.toString().slice(0, 80),
-                                text: text.slice(0, 200),
-                                display: style.display,
-                                position: style.position,
-                                zIndex: style.zIndex
-                            });
+                except Exception as e:
+                    print(f"  새 탭 없음: {e}")
+                    # JS로 직접 클릭 이벤트 실행
+                    print("\nJS로 링크 클릭...")
+                    result = await page.evaluate("""
+                        () => {
+                            const section = document.querySelector("[class*='f_bnr_card_prom']");
+                            const link = section?.querySelector('a');
+                            if (link) {
+                                link.click();
+                                return { found: true, href: link.href, onclick: link.getAttribute('onclick') };
+                            }
+                            return { found: false };
                         }
-                    }
-                });
-                return results.slice(0, 10);
-            }
-        """)
-        print(f"\n현대카드/롯데카드 포함 요소 {len(new_elements)}개:")
-        for el in new_elements:
-            print(f"  [{el['tag']}] cls={el['cls'][:50]}")
-            print(f"    text='{el['text'][:100]}'")
-            print(f"    display={el['display']} position={el['position']} zIndex={el['zIndex']}")
+                    """)
+                    print(f"  JS 클릭 결과: {result}")
+                    await asyncio.sleep(3)
+                    print(f"  클릭 후 URL: {page.url}")
 
-        # 탭 구조 찾기
-        tabs = await page.evaluate("""
-            () => {
-                const results = [];
-                document.querySelectorAll('*').forEach(el => {
-                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
-                    if (text && (text === '롯데카드' || text === 'KB국민' || text === '현대카드') ) {
-                        const rect = el.getBoundingClientRect();
-                        const style = window.getComputedStyle(el);
-                        if (rect.width > 0 && style.display !== 'none') {
-                            results.push({
-                                tag: el.tagName,
-                                cls: el.className?.toString().slice(0, 60),
-                                text,
-                                x: Math.round(rect.left + rect.width / 2),
-                                y: Math.round(rect.top + rect.height / 2),
-                            });
-                        }
-                    }
-                });
-                return results;
-            }
-        """)
-        print(f"\n탭 요소 {len(tabs)}개:")
-        for t in tabs:
-            print(f"  [{t['tag']}] '{t['text']}' x={t['x']} y={t['y']} cls={t['cls'][:40]}")
+                    # DOM 변화 확인
+                    new_text = await page.evaluate("() => document.body.innerText")
+                    if "현대카드" in new_text:
+                        idx = new_text.find("현대카드")
+                        print(f"  현대카드 발견:\n{new_text[max(0,idx-100):idx+300]}")
+                    else:
+                        print("  현대카드 여전히 없음")
 
         await browser.close()
         print("\n디버그 완료")
