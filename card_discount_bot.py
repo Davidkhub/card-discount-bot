@@ -5,7 +5,7 @@ from datetime import datetime
 from playwright.async_api import async_playwright
 
 async def main():
-    print("Hmall 카드탭 클릭 디버그")
+    print("Hmall 카드 클릭 이벤트 디버그")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -51,100 +51,75 @@ async def main():
         except Exception as e:
             print(f"혜택 탭 클릭 실패: {e}")
 
-        # 오늘 카드 탭 요소들 찾기 (알림신청 버튼 기준으로 앞의 카드 찾기)
-        print("\n오늘 카드 탭 요소 탐색...")
-        card_info = await page.evaluate("""
+        # 오늘 카드 섹션의 모든 클릭 가능 요소 좌표 찾기
+        print("\n오늘 카드 영역 요소 탐색...")
+        card_elements = await page.evaluate("""
             () => {
                 const results = [];
-                // '알림신청' 버튼들을 기준으로 찾기
-                document.querySelectorAll('button, a').forEach(el => {
-                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
-                    if (text === '알림신청') {
-                        // 부모로 올라가서 카드 컨테이너 찾기
-                        let parent = el;
-                        for (let i = 0; i < 6; i++) {
-                            parent = parent.parentElement;
-                            if (!parent) break;
-                        }
-                        if (parent) {
-                            results.push({
-                                containerText: parent.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 100),
-                                containerClass: parent.className?.toString().slice(0, 80),
-                                containerTag: parent.tagName,
-                                clickable: parent.onclick !== null || parent.tagName === 'A' || parent.tagName === 'BUTTON'
-                            });
-                        }
-                    }
-                });
-                return results;
-            }
-        """)
-        print(f"알림신청 버튼 기준 카드 컨테이너 {len(card_info)}개:")
-        for i, c in enumerate(card_info):
-            print(f"  [{i}] tag={c['containerTag']} | text='{c['containerText']}' | cls={c['containerClass'][:50]}")
-
-        # 첫 번째 카드 탭 클릭 시도 (새 페이지 감지)
-        print("\n첫 번째 카드 클릭 시도...")
-        try:
-            # 새 페이지 열림 감지
-            async with context.expect_page(timeout=5000) as new_page_info:
-                # 오늘 섹션의 첫 번째 클릭 가능 요소 클릭
-                today_card = await page.evaluate("""
-                    () => {
-                        const allEls = document.querySelectorAll('*');
-                        for (const el of allEls) {
-                            if (el.innerText?.trim() === '알림신청') {
-                                let parent = el;
-                                for (let i = 0; i < 8; i++) {
-                                    parent = parent.parentElement;
-                                    if (!parent) break;
-                                    if (parent.tagName === 'A' && parent.href && !parent.href.endsWith('#')) {
-                                        return { href: parent.href, tag: parent.tagName };
-                                    }
-                                }
+                const all = document.querySelectorAll('*');
+                for (const el of all) {
+                    const text = el.innerText?.trim();
+                    // "즉시할인" 텍스트를 포함한 카드 찾기
+                    if (text === '즉시할인') {
+                        const rect = el.getBoundingClientRect();
+                        // 부모로 올라가면서 클릭 가능한 요소 찾기
+                        let clickable = el;
+                        for (let i = 0; i < 10; i++) {
+                            clickable = clickable.parentElement;
+                            if (!clickable) break;
+                            const style = window.getComputedStyle(clickable);
+                            if (style.cursor === 'pointer' || clickable.tagName === 'A' || clickable.tagName === 'BUTTON') {
                                 break;
                             }
                         }
-                        return null;
+                        const crect = clickable ? clickable.getBoundingClientRect() : rect;
+                        results.push({
+                            tag: clickable?.tagName,
+                            cls: clickable?.className?.toString().slice(0, 60),
+                            x: Math.round(crect.left + crect.width / 2),
+                            y: Math.round(crect.top + crect.height / 2),
+                            width: Math.round(crect.width),
+                            height: Math.round(crect.height),
+                            parentText: clickable?.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 60)
+                        });
                     }
-                """)
-                print(f"  첫 번째 카드 링크: {today_card}")
+                }
+                return results;
+            }
+        """)
 
-                if today_card and today_card.get('href'):
-                    await page.goto(today_card['href'], wait_until="domcontentloaded", timeout=20000)
-                else:
-                    # 직접 클릭
-                    card_els = await page.query_selector_all('[class*="zk73pr"]')
-                    if card_els:
-                        await card_els[0].click()
-                    else:
-                        raise Exception("클릭 대상 없음")
+        print(f"즉시할인 요소 {len(card_elements)}개 발견:")
+        for i, el in enumerate(card_elements):
+            print(f"  [{i}] tag={el['tag']} x={el['x']} y={el['y']} w={el['width']} h={el['height']}")
+            print(f"       cls={el['cls'][:50]}")
+            print(f"       text='{el['parentText']}'")
 
-            new_page = await new_page_info.value
-            await new_page.wait_for_load_state("domcontentloaded")
-            print(f"  새 페이지 URL: {new_page.url}")
-            await new_page.screenshot(path="screenshots/hmall_card_detail.png", full_page=True)
-            content = await new_page.evaluate("() => document.body.innerText.slice(0, 500)")
-            print(f"  내용: {content}")
+        # 첫 번째 카드(오늘) 좌표 클릭
+        if card_elements:
+            first = card_elements[0]
+            print(f"\n첫 번째 카드 좌표 클릭: ({first['x']}, {first['y']})")
 
-        except Exception as e:
-            print(f"  새 페이지 감지 실패: {e}")
-            # 현재 페이지에서 URL 변화 확인
-            before_url = page.url
+            # 새 페이지 열림 감지
             try:
-                card_els = await page.query_selector_all('[class*="zk73pr"]')
-                print(f"  zk73pr 클래스 요소 {len(card_els)}개 발견")
-                if card_els:
-                    await card_els[0].click(force=True)
-                    await asyncio.sleep(3)
-                    after_url = page.url
-                    print(f"  클릭 전 URL: {before_url}")
-                    print(f"  클릭 후 URL: {after_url}")
-                    await page.screenshot(path="screenshots/hmall_after_card_click.png")
-                    content = await page.evaluate("() => document.body.innerText.slice(0, 500)")
-                    print(f"  내용: {content}")
-            except Exception as e2:
-                print(f"  직접 클릭도 실패: {e2}")
+                async with context.expect_page(timeout=5000) as new_page_info:
+                    await page.mouse.click(first['x'], first['y'])
+                new_page = await new_page_info.value
+                await new_page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(3)
+                print(f"  새 페이지 URL: {new_page.url}")
+                await new_page.screenshot(path="screenshots/hmall_card_detail.png", full_page=True)
+                content = await new_page.evaluate("() => document.body.innerText.slice(0, 500)")
+                print(f"  내용:\n{content}")
+
+            except Exception as e:
+                print(f"  새 페이지 없음: {e}")
+                # 현재 페이지 URL 변화 확인
+                await page.mouse.click(first['x'], first['y'])
+                await asyncio.sleep(3)
+                print(f"  클릭 후 URL: {page.url}")
+                await page.screenshot(path="screenshots/hmall_card_click.png", full_page=False)
+                content = await page.evaluate("() => document.body.innerText.slice(0, 500)")
+                print(f"  내용:\n{content}")
 
         await browser.close()
         print("\n디버그 완료")
