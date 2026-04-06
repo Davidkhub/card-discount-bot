@@ -5,7 +5,7 @@ from datetime import datetime
 from playwright.async_api import async_playwright
 
 async def main():
-    print("롯데홈쇼핑 폰트 차단 후 캡처")
+    print("롯데홈쇼핑 폰트 CSS 제거 후 캡처")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -24,13 +24,12 @@ async def main():
             ),
         )
 
-        # 폰트/이미지 요청 차단
+        # 폰트 요청 차단
         async def block_fonts(route):
-            if route.request.resource_type in ["font"]:
+            if route.request.resource_type == "font":
                 await route.abort()
             else:
                 await route.continue_()
-
         await context.route("**/*", block_fonts)
 
         page = await context.new_page()
@@ -45,6 +44,27 @@ async def main():
             print(f"  goto 예외 무시: {e}")
         await asyncio.sleep(6)
 
+        # 폰트 로딩 완전 제거 (JS로)
+        await page.evaluate("""
+            () => {
+                // 모든 @font-face 제거
+                for (const sheet of document.styleSheets) {
+                    try {
+                        for (let i = sheet.cssRules.length - 1; i >= 0; i--) {
+                            if (sheet.cssRules[i].constructor.name === 'CSSFontFaceRule') {
+                                sheet.deleteRule(i);
+                            }
+                        }
+                    } catch(e) {}
+                }
+                // 모든 요소에 시스템 폰트 강제 적용
+                const style = document.createElement('style');
+                style.textContent = '* { font-family: Arial, sans-serif !important; }';
+                document.head.appendChild(style);
+            }
+        """)
+        await asyncio.sleep(1)
+
         os.makedirs("screenshots", exist_ok=True)
 
         # 팝업 닫기
@@ -58,13 +78,21 @@ async def main():
             except Exception:
                 pass
 
-        # 카드 청구할인 섹션 요소 스크린샷
+        # 카드 청구할인 섹션 찾기
         print("\n카드 청구할인 섹션 캡처...")
         section = await page.query_selector("[class*='f_bnr_card_prom']")
         if section:
-            # 요소 위치로 스크롤
             await section.scroll_into_view_if_needed()
             await asyncio.sleep(2)
+
+            # 폰트 재제거 (스크롤 후)
+            await page.evaluate("""
+                () => {
+                    const style = document.createElement('style');
+                    style.textContent = '* { font-family: Arial, sans-serif !important; }';
+                    document.head.appendChild(style);
+                }
+            """)
 
             path = "screenshots/lotte_card_section.png"
             await section.screenshot(path=path)
@@ -73,7 +101,7 @@ async def main():
             text = await section.inner_text()
             print(f"  섹션 텍스트:\n{text}")
 
-            # 오늘 카드 클릭 요소 찾기
+            # 오늘 카드 요소 찾기
             cards = await page.evaluate("""
                 () => {
                     const section = document.querySelector("[class*='f_bnr_card_prom']");
@@ -111,7 +139,15 @@ async def main():
                 await asyncio.sleep(3)
                 print(f"클릭 후 URL: {page.url}")
 
-                # 클릭 후 화면 캡처
+                # 폰트 재제거
+                await page.evaluate("""
+                    () => {
+                        const style = document.createElement('style');
+                        style.textContent = '* { font-family: Arial, sans-serif !important; }';
+                        document.head.appendChild(style);
+                    }
+                """)
+
                 await page.screenshot(path="screenshots/lotte_after_click.png")
                 print("클릭 후 스크린샷 저장")
 
