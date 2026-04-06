@@ -107,16 +107,47 @@ async def capture_hmall(context):
         await page.evaluate("window.scrollTo(0, 900)")
         await asyncio.sleep(2)
 
-        # 오늘 카드 수 파악
+        # 오늘 카드 수 파악 - 개선된 파싱
         full_text = await page.evaluate("() => document.body.innerText")
-        today_count = 1
-        match = re.search(
-            r"오늘\s*[\d.]+\s*\([월화수목금토일]\)(.*?)(?=\d{2}\.\d{2}\s*\([월화수목금토일]\)|오늘의 간편결제)",
-            full_text, re.DOTALL
-        )
-        if match:
-            today_count = match.group(1).count("즉시할인")
-            print(f"  오늘 카드 수: {today_count}개")
+        print(f"\n  [디버그] 카드혜택 섹션 텍스트:")
+
+        # "한눈에 보는 카드 혜택" 이후 텍스트 추출
+        card_section = ""
+        card_match = re.search(r"한눈에 보는 카드 혜택(.+?)오늘의 간편결제", full_text, re.DOTALL)
+        if card_match:
+            card_section = card_match.group(1)
+            print(f"  {card_section[:300]}")
+
+        # 오늘 날짜 패턴 생성 (예: 04.06)
+        now = datetime.now()
+        today_pattern = f"{now.month:02d}.{now.day:02d}"
+        print(f"\n  오늘 날짜 패턴: {today_pattern}")
+
+        # 오늘 날짜 이후 ~ 다음 날짜 이전까지 즉시할인 개수 파악
+        today_count = 0
+        if card_section:
+            # 오늘 날짜 위치 찾기
+            today_pos = card_section.find(today_pattern)
+            if today_pos == -1:
+                # "오늘" 키워드로 fallback
+                today_pos = card_section.find("오늘")
+            
+            if today_pos >= 0:
+                after_today = card_section[today_pos:]
+                # 다음 날짜 패턴 위치 찾기 (MM.DD 형식)
+                next_date = re.search(r"\d{2}\.\d{2}\s*\([월화수목금토일]\)", after_today[5:])
+                if next_date:
+                    today_section = after_today[: next_date.start() + 5]
+                else:
+                    today_section = after_today[:500]
+                
+                today_count = today_section.count("즉시할인")
+                print(f"  오늘 섹션 텍스트: {today_section[:200]}")
+                print(f"  오늘 카드 수: {today_count}개")
+
+        if today_count == 0:
+            today_count = 1
+            print("  카드 수 파악 실패 - 1개로 기본값 설정")
 
         # 카드 요소 좌표 수집
         card_elements = await page.evaluate("""
@@ -146,7 +177,7 @@ async def capture_hmall(context):
         today_cards = card_elements[:today_count]
         print(f"  오늘 카드 목록: {[c['text'] for c in today_cards]}")
 
-        # ── 핵심: 각 카드 URL을 먼저 모두 수집 ──
+        # 각 카드 URL 수집
         card_urls = []
         for i, card in enumerate(today_cards):
             print(f"\n  [{i+1}] URL 수집: '{card['text']}'")
@@ -154,19 +185,21 @@ async def capture_hmall(context):
             await asyncio.sleep(3)
             url = page.url
             print(f"       URL: {url}")
+
             if url and 'dpl/index' not in url:
-                card_name = card['text'].replace('즉시할인', '').replace('%', '').strip()
-                # 숫자만 추출해서 카드명+할인율 조합
-                pct_match = re.search(r'\d+', card['text'])
-                pct = pct_match.group() + "%" if pct_match else ""
+                # 카드명 정리
+                text = card['text']
+                pct_match = re.search(r'(\d+)\s*%', text)
+                pct = pct_match.group(1) + "%" if pct_match else ""
+                card_name = re.sub(r'즉시할인|\d+\s*%', '', text).strip()
                 card_urls.append({"name": card_name, "pct": pct, "url": url})
-            # 뒤로가기
+
+            # 뒤로가기 후 원상복구
             await page.go_back(wait_until="domcontentloaded", timeout=15000)
             await asyncio.sleep(3)
             await page.evaluate(
                 "() => { document.querySelectorAll('[role=\"dialog\"], #modal-root > *').forEach(el => el.remove()); }"
             )
-            # 혜택 탭 재클릭
             try:
                 el = await page.query_selector("[data-maindispseq='7']")
                 if el:
@@ -176,6 +209,7 @@ async def capture_hmall(context):
                 pass
             await page.evaluate("window.scrollTo(0, 900)")
             await asyncio.sleep(2)
+
             # 요소 재탐색
             card_elements = await page.evaluate("""
                 () => {
@@ -202,9 +236,9 @@ async def capture_hmall(context):
             """)
             today_cards = card_elements[:today_count]
 
-        print(f"\n  수집된 URL {len(card_urls)}개: {[c['url'] for c in card_urls]}")
+        print(f"\n  수집된 URL {len(card_urls)}개")
 
-        # ── 각 URL 직접 접속 → 스크린샷 ──
+        # 각 URL 접속 → 스크린샷
         for i, card in enumerate(card_urls):
             print(f"\n  [{i+1}] 스크린샷: {card['name']} {card['pct']}")
             try:
@@ -213,7 +247,10 @@ async def capture_hmall(context):
                 path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
                 await page.screenshot(path=path, full_page=True)
                 print(f"       저장: {path}")
-                results.append({"card_name": f"{card['name']} {card['pct']}", "path": path})
+                results.append({
+                    "card_name": f"{card['name']} {card['pct']}",
+                    "path": path
+                })
             except Exception as e:
                 print(f"       오류: {e}")
 
@@ -243,7 +280,7 @@ def send_email(cj_path, hmall_results):
         cid_map["cj"] = ("img_cj", cj_path)
         cj_block = '<img src="cid:img_cj" style="max-width:100%;border:1px solid #eee;border-radius:8px;display:block;">'
     else:
-        cj_block = '<p style="color:#aaa;">수집 실패 - <a href="https://display.cjonstyle.com/m/homeTab/main?hmtabMenuId=H00005">직접 확인</a></p>'
+        cj_block = '<p style="color:#aaa;">수집 실패</p>'
 
     hmall_blocks = ""
     if hmall_results:
@@ -256,7 +293,8 @@ def send_email(cj_path, hmall_results):
                         border-left:3px solid #185FA5;padding-left:8px;">
                 {r['card_name']}
               </p>
-              <img src="cid:{cid}" style="max-width:100%;border:1px solid #eee;border-radius:8px;display:block;">
+              <img src="cid:{cid}" style="max-width:100%;border:1px solid #eee;
+                                          border-radius:8px;display:block;">
             </div>"""
     else:
         hmall_blocks = '<p style="color:#aaa;">수집 실패</p>'
