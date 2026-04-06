@@ -103,53 +103,10 @@ async def capture_hmall(context):
         except Exception as e:
             print(f"  혜택 탭 클릭 실패: {e}")
 
-        # 카드 섹션 스크롤
+        # 카드 섹션 스크롤 후 첫 번째 카드 클릭
         await page.evaluate("window.scrollTo(0, 900)")
         await asyncio.sleep(2)
 
-        # 오늘 카드 수 파악 - 개선된 파싱
-        full_text = await page.evaluate("() => document.body.innerText")
-        print(f"\n  [디버그] 카드혜택 섹션 텍스트:")
-
-        # "한눈에 보는 카드 혜택" 이후 텍스트 추출
-        card_section = ""
-        card_match = re.search(r"한눈에 보는 카드 혜택(.+?)오늘의 간편결제", full_text, re.DOTALL)
-        if card_match:
-            card_section = card_match.group(1)
-            print(f"  {card_section[:300]}")
-
-        # 오늘 날짜 패턴 생성 (예: 04.06)
-        now = datetime.now()
-        today_pattern = f"{now.month:02d}.{now.day:02d}"
-        print(f"\n  오늘 날짜 패턴: {today_pattern}")
-
-        # 오늘 날짜 이후 ~ 다음 날짜 이전까지 즉시할인 개수 파악
-        today_count = 0
-        if card_section:
-            # 오늘 날짜 위치 찾기
-            today_pos = card_section.find(today_pattern)
-            if today_pos == -1:
-                # "오늘" 키워드로 fallback
-                today_pos = card_section.find("오늘")
-            
-            if today_pos >= 0:
-                after_today = card_section[today_pos:]
-                # 다음 날짜 패턴 위치 찾기 (MM.DD 형식)
-                next_date = re.search(r"\d{2}\.\d{2}\s*\([월화수목금토일]\)", after_today[5:])
-                if next_date:
-                    today_section = after_today[: next_date.start() + 5]
-                else:
-                    today_section = after_today[:500]
-                
-                today_count = today_section.count("알림신청")
-                print(f"  오늘 섹션 텍스트: {today_section[:200]}")
-                print(f"  오늘 카드 수: {today_count}개")
-
-        if today_count == 0:
-            today_count = 1
-            print("  카드 수 파악 실패 - 1개로 기본값 설정")
-
-        # 카드 요소 좌표 수집
         card_elements = await page.evaluate("""
             () => {
                 const results = [];
@@ -159,8 +116,7 @@ async def capture_hmall(context):
                         for (let i = 0; i < 10; i++) {
                             parent = parent.parentElement;
                             if (!parent) break;
-                            const style = window.getComputedStyle(parent);
-                            if (style.cursor === 'pointer') break;
+                            if (window.getComputedStyle(parent).cursor === 'pointer') break;
                         }
                         const rect = parent ? parent.getBoundingClientRect() : el.getBoundingClientRect();
                         results.push({
@@ -174,85 +130,66 @@ async def capture_hmall(context):
             }
         """)
 
-        today_cards = card_elements[:today_count]
-        print(f"  오늘 카드 목록: {[c['text'] for c in today_cards]}")
+        if not card_elements:
+            print("  카드 요소 없음")
+            return []
 
-        # 각 카드 URL 수집
-        card_urls = []
-        for i, card in enumerate(today_cards):
-            print(f"\n  [{i+1}] URL 수집: '{card['text']}'")
-            await page.mouse.click(card['x'], card['y'])
-            await asyncio.sleep(3)
-            url = page.url
-            print(f"       URL: {url}")
+        # 첫 번째 카드 클릭 → 상세 페이지 진입
+        first = card_elements[0]
+        print(f"\n  첫 번째 카드 클릭: '{first['text']}'")
+        await page.mouse.click(first['x'], first['y'])
+        await asyncio.sleep(3)
+        print(f"  상세 페이지 URL: {page.url}")
 
-            if url and 'dpl/index' not in url:
-                # 카드명 정리
-                text = card['text']
-                pct_match = re.search(r'(\d+)\s*%', text)
-                pct = pct_match.group(1) + "%" if pct_match else ""
-                card_name = re.sub(r'즉시할인|\d+\s*%', '', text).strip()
-                card_urls.append({"name": card_name, "pct": pct, "url": url})
-
-            # 뒤로가기 후 원상복구
-            await page.go_back(wait_until="domcontentloaded", timeout=15000)
-            await asyncio.sleep(3)
-            await page.evaluate(
-                "() => { document.querySelectorAll('[role=\"dialog\"], #modal-root > *').forEach(el => el.remove()); }"
-            )
-            try:
-                el = await page.query_selector("[data-maindispseq='7']")
-                if el:
-                    await el.click(force=True)
-                    await asyncio.sleep(3)
-            except Exception:
-                pass
-            await page.evaluate("window.scrollTo(0, 900)")
-            await asyncio.sleep(2)
-
-            # 요소 재탐색
-            card_elements = await page.evaluate("""
-                () => {
-                    const results = [];
-                    document.querySelectorAll('*').forEach(el => {
-                        if (el.innerText?.trim() === '즉시할인') {
-                            let parent = el;
-                            for (let i = 0; i < 10; i++) {
-                                parent = parent.parentElement;
-                                if (!parent) break;
-                                const style = window.getComputedStyle(parent);
-                                if (style.cursor === 'pointer') break;
-                            }
-                            const rect = parent ? parent.getBoundingClientRect() : el.getBoundingClientRect();
+        # ── 상세 페이지 내 탭 목록 파악 ──
+        tabs = await page.evaluate("""
+            () => {
+                const results = [];
+                // 상단 탭 영역 찾기 (카드사명 + % 포함 탭)
+                document.querySelectorAll('a, button, li, div[role="tab"]').forEach(el => {
+                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
+                    if (text && text.length < 30 && /%/.test(text)) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
                             results.push({
+                                tag: el.tagName,
+                                text,
+                                cls: el.className?.toString().slice(0, 60),
                                 x: Math.round(rect.left + rect.width / 2),
                                 y: Math.round(rect.top + rect.height / 2),
-                                text: parent?.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 40)
                             });
                         }
-                    });
-                    return results;
-                }
-            """)
-            today_cards = card_elements[:today_count]
+                    }
+                });
+                return results;
+            }
+        """)
+        print(f"\n  상세 페이지 탭 목록 ({len(tabs)}개):")
+        for t in tabs:
+            print(f"    [{t['tag']}] '{t['text']}' x={t['x']} y={t['y']} cls={t['cls'][:40]}")
 
-        print(f"\n  수집된 URL {len(card_urls)}개")
+        # 탭이 없으면 현재 페이지만 캡처
+        if not tabs:
+            path = os.path.join(SCREENSHOT_DIR, f"hmall_0_{today}.png")
+            await page.screenshot(path=path, full_page=True)
+            card_name = first['text'].replace('즉시할인', '').strip()
+            results.append({"card_name": card_name, "path": path})
+            print(f"  탭 없음 - 현재 페이지 캡처: {path}")
+            return results
 
-        # 각 URL 접속 → 스크린샷
-        for i, card in enumerate(card_urls):
-            print(f"\n  [{i+1}] 스크린샷: {card['name']} {card['pct']}")
+        # 탭마다 클릭 → 스크린샷
+        for i, tab in enumerate(tabs):
+            print(f"\n  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
             try:
-                await page.goto(card['url'], wait_until="domcontentloaded", timeout=20000)
-                await asyncio.sleep(3)
+                await page.mouse.click(tab['x'], tab['y'])
+                await asyncio.sleep(2)
+
                 path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
                 await page.screenshot(path=path, full_page=True)
-                print(f"       저장: {path}")
-                results.append({
-                    "card_name": f"{card['name']} {card['pct']}",
-                    "path": path
-                })
+                print(f"    스크린샷 저장: {path}")
+                results.append({"card_name": tab['text'], "path": path})
             except Exception as e:
-                print(f"       오류: {e}")
+                print(f"    오류: {e}")
 
         return results
 
