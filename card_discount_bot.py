@@ -5,7 +5,7 @@ from datetime import datetime
 from playwright.async_api import async_playwright
 
 async def main():
-    print("롯데홈쇼핑 카드청구할인 영역 캡처 디버그")
+    print("롯데홈쇼핑 카드청구할인 요소 직접 캡처")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -48,74 +48,38 @@ async def main():
             except Exception:
                 pass
 
-        # "카드 청구할인" 텍스트 요소 찾기 → 해당 영역 스크롤 후 캡처
-        print("\n카드 청구할인 영역 찾기...")
-        section_info = await page.evaluate("""
-            () => {
-                let target = null;
-                document.querySelectorAll('*').forEach(el => {
-                    if (el.childNodes.length <= 3 &&
-                        el.innerText?.trim() === '카드 청구할인') {
-                        target = el;
-                    }
-                });
-                if (!target) return null;
+        # f_bnr_card_prom 클래스로 직접 요소 찾기
+        print("\n카드 청구할인 요소 직접 캡처...")
+        section = await page.query_selector("[class*='f_bnr_card_prom']")
+        if section:
+            path = "screenshots/lotte_card_section.png"
+            await section.screenshot(path=path, timeout=60000)
+            print(f"  섹션 스크린샷 저장: {path}")
 
-                // 부모 컨테이너 찾기 (카드들 포함)
-                let container = target;
-                for (let i = 0; i < 6; i++) {
-                    if (container.parentElement) container = container.parentElement;
-                    const h = container.getBoundingClientRect().height;
-                    if (h > 150) break;
-                }
-                const rect = container.getBoundingClientRect();
-                return {
-                    x: Math.round(rect.left),
-                    y: Math.round(rect.top + window.scrollY),
-                    width: Math.round(rect.width),
-                    height: Math.round(rect.height),
-                    cls: container.className?.toString().slice(0, 60),
-                    tag: container.tagName
-                };
-            }
-        """)
-        print(f"카드 청구할인 섹션: {section_info}")
+            # 섹션 내 텍스트
+            text = await section.inner_text()
+            print(f"  섹션 텍스트:\n{text}")
 
-        if section_info:
-            # 해당 위치로 스크롤
-            scroll_y = max(0, section_info['y'] - 100)
-            await page.evaluate(f"window.scrollTo(0, {scroll_y})")
-            await asyncio.sleep(2)
-
-            # 스크린샷 (뷰포트 기준)
-            await page.screenshot(
-                path="screenshots/lotte_card_section.png",
-                timeout=60000,
-                clip={
-                    "x": 0,
-                    "y": 0,
-                    "width": 1280,
-                    "height": 900,
-                }
-            )
-            print("카드 청구할인 섹션 스크린샷 저장!")
-
-            # 오늘 카드 클릭 요소 찾기
+            # 오늘 카드 클릭 요소 찾기 (섹션 내부)
             cards = await page.evaluate("""
                 () => {
+                    const section = document.querySelector("[class*='f_bnr_card_prom']");
+                    if (!section) return [];
                     const results = [];
-                    document.querySelectorAll('*').forEach(el => {
+                    section.querySelectorAll('a, button, li, div').forEach(el => {
                         const text = el.innerText?.trim().replace(/\\s+/g, ' ');
                         if (text && text.includes('청구할인') && text.includes('%') && text.length < 30) {
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 30 && rect.height > 30 && rect.top > 0) {
+                            const style = window.getComputedStyle(el);
+                            if (rect.width > 30 && rect.height > 30) {
                                 results.push({
                                     tag: el.tagName,
                                     text,
                                     x: Math.round(rect.left + rect.width / 2),
                                     y: Math.round(rect.top + rect.height / 2),
                                     cls: el.className?.toString().slice(0, 60),
-                                    href: el.href || el.onclick?.toString().slice(0, 80) || ''
+                                    cursor: style.cursor,
+                                    href: el.href || ''
                                 });
                             }
                         }
@@ -123,9 +87,9 @@ async def main():
                     return results;
                 }
             """)
-            print(f"\n오늘 카드 요소 {len(cards)}개:")
+            print(f"\n섹션 내 카드 요소 {len(cards)}개:")
             for c in cards:
-                print(f"  [{c['tag']}] '{c['text']}' x={c['x']} y={c['y']} cls={c['cls'][:40]}")
+                print(f"  [{c['tag']}] '{c['text']}' x={c['x']} y={c['y']} cursor={c['cursor']} href={c['href'][:60]}")
 
             # 첫 번째 카드 클릭
             if cards:
@@ -135,20 +99,45 @@ async def main():
                 await asyncio.sleep(3)
                 print(f"클릭 후 URL: {page.url}")
 
-                await page.screenshot(
-                    path="screenshots/lotte_after_click.png",
-                    timeout=60000,
-                )
-                print("클릭 후 스크린샷 저장")
+                # 클릭 후 새 요소 확인 (모달/상세)
+                modal = await page.evaluate("""
+                    () => {
+                        const dialogs = document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="layer"], [class*="popup"]');
+                        const results = [];
+                        dialogs.forEach(el => {
+                            const style = window.getComputedStyle(el);
+                            if (style.display !== 'none' && style.visibility !== 'hidden') {
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 100 && rect.height > 100) {
+                                    results.push({
+                                        tag: el.tagName,
+                                        cls: el.className?.toString().slice(0, 60),
+                                        text: el.innerText?.trim().slice(0, 200),
+                                        x: Math.round(rect.x),
+                                        y: Math.round(rect.y),
+                                        w: Math.round(rect.width),
+                                        h: Math.round(rect.height),
+                                    });
+                                }
+                            }
+                        });
+                        return results;
+                    }
+                """)
+                print(f"\n클릭 후 모달/레이어 {len(modal)}개:")
+                for m in modal:
+                    print(f"  [{m['tag']}] cls={m['cls'][:40]} w={m['w']} h={m['h']}")
+                    print(f"  text='{m['text'][:150]}'")
 
-                content = await page.evaluate("() => document.body.innerText.slice(0, 800)")
-                print(f"\n클릭 후 텍스트:\n{content}")
+                # 모달이 있으면 요소 스크린샷
+                if modal:
+                    for i, m in enumerate(modal[:3]):
+                        el = await page.query_selector(f"[class*='{m['cls'].split()[0]}']")
+                        if el:
+                            await el.screenshot(path=f"screenshots/lotte_modal_{i}.png", timeout=30000)
+                            print(f"  모달 스크린샷 저장: lotte_modal_{i}.png")
         else:
-            print("카드 청구할인 섹션 못 찾음")
-            full_text = await page.evaluate("() => document.body.innerText")
-            idx = full_text.find('청구할인')
-            if idx >= 0:
-                print(f"청구할인 주변:\n{full_text[max(0,idx-50):idx+300]}")
+            print("f_bnr_card_prom 요소 못 찾음")
 
         await browser.close()
         print("\n디버그 완료")
