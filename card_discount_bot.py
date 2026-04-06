@@ -164,8 +164,11 @@ async def capture_hmall(context):
         await page.close()
 
 
-async def collect_lotte(context):
-    page = await context.new_page()
+async def collect_lotte(browser):
+    page = await browser.new_page(
+        viewport={"width": 1280, "height": 900},
+        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    )
     try:
         print("[롯데홈쇼핑] 접속 중...")
 
@@ -193,7 +196,7 @@ async def collect_lotte(context):
             except Exception:
                 pass
 
-        # 카드 섹션으로 스크롤 후 JS 클릭 → 상세 페이지 URL 획득
+        # 카드 섹션으로 스크롤 후 JS 클릭
         section = await page.query_selector("[class*='f_bnr_card_prom']")
         if not section:
             print("  카드 섹션 못 찾음")
@@ -202,7 +205,6 @@ async def collect_lotte(context):
         await section.scroll_into_view_if_needed()
         await asyncio.sleep(2)
 
-        # JS로 링크 클릭 → URL 변경 감지
         await page.evaluate("""
             () => {
                 const section = document.querySelector("[class*='f_bnr_card_prom']");
@@ -214,11 +216,12 @@ async def collect_lotte(context):
         detail_url = page.url
         print(f"  상세 페이지 URL: {detail_url}")
 
-        if "lotteimall.com" not in detail_url or "viewMain" in detail_url:
+        # URL 변경 확인 (viewMain 이 아닌 다른 페이지면 성공)
+        if "viewMain" in detail_url or "lotteimall.com" not in detail_url:
             print("  URL 변경 실패")
             return []
 
-        # 상세 페이지에서 탭 목록 수집
+        # 탭 목록 수집
         tabs = await page.evaluate("""
             () => {
                 const results = [];
@@ -253,13 +256,11 @@ async def collect_lotte(context):
                 await page.mouse.click(tab['x'], tab['y'])
                 await asyncio.sleep(2)
 
-                # 현재 탭 상세 내용 수집
                 detail = await page.evaluate("""
                     () => {
-                        // 메인 콘텐츠 영역 찾기
                         const selectors = [
                             '.event_view', '.card_detail', '[class*="card_cont"]',
-                            '[class*="event_cont"]', 'main', '.cont_wrap'
+                            '[class*="event_cont"]', 'main', '.cont_wrap', '#contents'
                         ];
                         for (const sel of selectors) {
                             const el = document.querySelector(sel);
@@ -272,7 +273,7 @@ async def collect_lotte(context):
                     "card_name": tab['text'],
                     "detail": detail
                 })
-                print(f"    수집 완료")
+                print(f"    수집 완료: {detail[:50]}")
             except Exception as e:
                 print(f"    오류: {e}")
 
@@ -437,7 +438,7 @@ async def main():
 
         cj_path = await capture_cj(browser)
         hmall_results = await capture_hmall(context)
-        lotte_cards = await collect_lotte(context)
+        lotte_cards = await collect_lotte(browser)
 
         await browser.close()
 
