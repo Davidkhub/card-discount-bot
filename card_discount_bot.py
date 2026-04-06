@@ -1,35 +1,181 @@
 #!/usr/bin/env python3
 import asyncio
+import smtplib
 import os
+import re
+from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 from playwright.async_api import async_playwright
 
-async def main():
-    print("롯데홈쇼핑 스크롤 후 클릭 디버그")
+GMAIL_USER     = os.environ.get("GMAIL_USER", "")
+GMAIL_PASSWORD = os.environ.get("GMAIL_PASSWORD", "")
+TO_EMAIL       = os.environ.get("TO_EMAIL", "")
+SCREENSHOT_DIR = "screenshots"
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+
+async def capture_cj(browser):
+    page = await browser.new_page(
+        viewport={"width": 1280, "height": 900},
+        user_agent=(
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+    )
+    try:
+        print("[CJ온스타일] 접속 중...")
+        await page.goto(
+            "https://display.cjonstyle.com/m/homeTab/main?hmtabMenuId=H00005",
+            wait_until="networkidle", timeout=40000,
         )
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-        )
+        await asyncio.sleep(5)
+        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+        today = datetime.now().strftime("%Y%m%d")
+        path = os.path.join(SCREENSHOT_DIR, f"cj_{today}.png")
+        captured = False
+        for selector in [".benefit_section", ".benefit_inner", ".lst_benefit"]:
+            try:
+                el = await page.query_selector(selector)
+                if el:
+                    box = await el.bounding_box()
+                    if box and box["width"] > 50 and box["height"] > 50:
+                        await el.screenshot(path=path)
+                        print(f"  캡처 성공: {selector}")
+                        captured = True
+                        break
+            except Exception:
+                continue
+        if not captured:
+            await page.screenshot(path=path)
+            print("  전체 페이지 캡처 (fallback)")
+        return path
+    except Exception as e:
+        print(f"  오류: {e}")
+        return None
+    finally:
+        await page.close()
+
+
+async def capture_hmall(context):
+    page = await context.new_page()
+    results = []
+    try:
+        print("[Hmall] 접속 중...")
+        try:
+            await page.goto("https://www.hmall.com/md/dpl/index", wait_until="domcontentloaded", timeout=40000)
+        except Exception as e:
+            print(f"  goto 예외 무시: {e}")
+        await asyncio.sleep(5)
+        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+        today = datetime.now().strftime("%Y%m%d")
+
+        try:
+            el = await page.query_selector("[aria-label='메인 배너 팝업'] button")
+            if el:
+                await el.click(force=True)
+                await asyncio.sleep(1)
+        except Exception:
+            pass
+        await page.evaluate("() => { document.querySelectorAll('[role=\"dialog\"], #modal-root > *').forEach(el => el.remove()); }")
+        await asyncio.sleep(1)
+
+        try:
+            el = await page.query_selector("[data-maindispseq='7']")
+            if el:
+                await el.click(force=True)
+                await asyncio.sleep(4)
+                print("  혜택 탭 클릭 성공")
+        except Exception as e:
+            print(f"  혜택 탭 클릭 실패: {e}")
+
+        await page.evaluate("window.scrollTo(0, 900)")
+        await asyncio.sleep(2)
+
+        card_elements = await page.evaluate("""
+            () => {
+                const results = [];
+                document.querySelectorAll('*').forEach(el => {
+                    if (el.innerText?.trim() === '즉시할인') {
+                        let parent = el;
+                        for (let i = 0; i < 10; i++) {
+                            parent = parent.parentElement;
+                            if (!parent) break;
+                            if (window.getComputedStyle(parent).cursor === 'pointer') break;
+                        }
+                        const rect = parent ? parent.getBoundingClientRect() : el.getBoundingClientRect();
+                        results.push({
+                            x: Math.round(rect.left + rect.width / 2),
+                            y: Math.round(rect.top + rect.height / 2),
+                            text: parent?.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 40)
+                        });
+                    }
+                });
+                return results;
+            }
+        """)
+
+        if not card_elements:
+            print("  카드 요소 없음")
+            return []
+
+        first = card_elements[0]
+        print(f"  첫 번째 카드 클릭: '{first['text']}'")
+        await page.mouse.click(first['x'], first['y'])
+        await asyncio.sleep(3)
+
+        tabs = await page.evaluate("""
+            () => {
+                const results = [];
+                document.querySelectorAll('a, button, li, div[role="tab"]').forEach(el => {
+                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
+                    if (text && text.length < 30 && /%/.test(text)) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) {
+                            results.push({
+                                tag: el.tagName, text,
+                                x: Math.round(rect.left + rect.width / 2),
+                                y: Math.round(rect.top + rect.height / 2),
+                            });
+                        }
+                    }
+                });
+                return results;
+            }
+        """)
+        print(f"  탭 {len(tabs)}개: {[t['text'] for t in tabs]}")
+
+        for i, tab in enumerate(tabs):
+            print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
+            try:
+                await page.mouse.click(tab['x'], tab['y'])
+                await asyncio.sleep(2)
+                path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
+                await page.screenshot(path=path, full_page=True)
+                results.append({"card_name": tab['text'], "path": path})
+            except Exception as e:
+                print(f"    오류: {e}")
+        return results
+    except Exception as e:
+        print(f"  전체 오류: {e}")
+        return []
+    finally:
+        await page.close()
+
+
+async def collect_lotte(context):
+    page = await context.new_page()
+    try:
+        print("[롯데홈쇼핑] 접속 중...")
 
         async def block_fonts(route):
             if route.request.resource_type == "font":
                 await route.abort()
             else:
                 await route.continue_()
-        await context.route("**/*", block_fonts)
+        await page.route("**/*", block_fonts)
 
-        page = await context.new_page()
-
-        print("메인 페이지 접속 중...")
         try:
             await page.goto("https://www.lotteimall.com/", wait_until="domcontentloaded", timeout=40000)
         except Exception as e:
@@ -47,88 +193,264 @@ async def main():
             except Exception:
                 pass
 
-        # 카드 섹션으로 스크롤 후 클릭
+        # 카드 섹션으로 스크롤 후 JS 클릭 → 상세 페이지 URL 획득
         section = await page.query_selector("[class*='f_bnr_card_prom']")
-        if section:
-            await section.scroll_into_view_if_needed()
-            await asyncio.sleep(2)
+        if not section:
+            print("  카드 섹션 못 찾음")
+            return []
 
-            # 스크롤 후 좌표 재계산
-            card_link = await page.query_selector("[class*='f_bnr_card_prom'] a")
-            if card_link:
-                box = await card_link.bounding_box()
-                print(f"카드 링크 위치: {box}")
+        await section.scroll_into_view_if_needed()
+        await asyncio.sleep(2)
 
-                # 새 탭 감지하면서 클릭
-                print("\n새 탭 감지하면서 클릭...")
-                try:
-                    async with context.expect_page(timeout=8000) as new_page_info:
-                        await card_link.click()
-                    new_page = await new_page_info.value
-                    await new_page.wait_for_load_state("domcontentloaded")
-                    await asyncio.sleep(4)
-                    print(f"  새 탭 URL: {new_page.url}")
+        # JS로 링크 클릭 → URL 변경 감지
+        await page.evaluate("""
+            () => {
+                const section = document.querySelector("[class*='f_bnr_card_prom']");
+                const link = section?.querySelector('a');
+                if (link) link.click();
+            }
+        """)
+        await asyncio.sleep(3)
+        detail_url = page.url
+        print(f"  상세 페이지 URL: {detail_url}")
 
-                    # 탭 목록 수집
-                    tabs = await new_page.evaluate("""
-                        () => {
-                            const results = [];
-                            document.querySelectorAll('a, button, li').forEach(el => {
-                                const text = el.innerText?.trim().replace(/\\s+/g, ' ');
-                                if (text && text.length < 20 && (
-                                    text.includes('롯데') || text.includes('KB') ||
-                                    text.includes('현대') || text.includes('카드')
-                                )) {
-                                    const rect = el.getBoundingClientRect();
-                                    if (rect.width > 30 && rect.height > 10) {
-                                        results.push({
-                                            tag: el.tagName, text,
-                                            x: Math.round(rect.left + rect.width/2),
-                                            y: Math.round(rect.top + rect.height/2),
-                                            cls: el.className?.toString().slice(0, 50)
-                                        });
-                                    }
-                                }
+        if "lotteimall.com" not in detail_url or "viewMain" in detail_url:
+            print("  URL 변경 실패")
+            return []
+
+        # 상세 페이지에서 탭 목록 수집
+        tabs = await page.evaluate("""
+            () => {
+                const results = [];
+                document.querySelectorAll('a, button, li').forEach(el => {
+                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
+                    if (text && text.length < 15 && (
+                        text.includes('롯데') || text.includes('KB') ||
+                        text.includes('현대') || text.includes('삼성') ||
+                        text.includes('신한') || text.includes('하나')
+                    )) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 30 && rect.height > 10) {
+                            results.push({
+                                tag: el.tagName, text,
+                                x: Math.round(rect.left + rect.width / 2),
+                                y: Math.round(rect.top + rect.height / 2),
+                                cls: el.className?.toString().slice(0, 50)
                             });
-                            return results;
                         }
-                    """)
-                    print(f"  탭 목록 {len(tabs)}개:")
-                    for t in tabs:
-                        print(f"    [{t['tag']}] '{t['text']}' x={t['x']} y={t['y']}")
+                    }
+                });
+                return results;
+            }
+        """)
+        print(f"  탭 목록 {len(tabs)}개: {[t['text'] for t in tabs]}")
 
-                    content = await new_page.evaluate("() => document.body.innerText.slice(0, 500)")
-                    print(f"\n  페이지 텍스트:\n{content}")
+        # 각 탭 클릭 → 텍스트 수집
+        card_results = []
+        for i, tab in enumerate(tabs):
+            print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
+            try:
+                await page.mouse.click(tab['x'], tab['y'])
+                await asyncio.sleep(2)
 
-                except Exception as e:
-                    print(f"  새 탭 없음: {e}")
-                    # JS로 직접 클릭 이벤트 실행
-                    print("\nJS로 링크 클릭...")
-                    result = await page.evaluate("""
-                        () => {
-                            const section = document.querySelector("[class*='f_bnr_card_prom']");
-                            const link = section?.querySelector('a');
-                            if (link) {
-                                link.click();
-                                return { found: true, href: link.href, onclick: link.getAttribute('onclick') };
-                            }
-                            return { found: false };
+                # 현재 탭 상세 내용 수집
+                detail = await page.evaluate("""
+                    () => {
+                        // 메인 콘텐츠 영역 찾기
+                        const selectors = [
+                            '.event_view', '.card_detail', '[class*="card_cont"]',
+                            '[class*="event_cont"]', 'main', '.cont_wrap'
+                        ];
+                        for (const sel of selectors) {
+                            const el = document.querySelector(sel);
+                            if (el) return el.innerText.trim().slice(0, 600);
                         }
-                    """)
-                    print(f"  JS 클릭 결과: {result}")
-                    await asyncio.sleep(3)
-                    print(f"  클릭 후 URL: {page.url}")
+                        return document.body.innerText.trim().slice(0, 600);
+                    }
+                """)
+                card_results.append({
+                    "card_name": tab['text'],
+                    "detail": detail
+                })
+                print(f"    수집 완료")
+            except Exception as e:
+                print(f"    오류: {e}")
 
-                    # DOM 변화 확인
-                    new_text = await page.evaluate("() => document.body.innerText")
-                    if "현대카드" in new_text:
-                        idx = new_text.find("현대카드")
-                        print(f"  현대카드 발견:\n{new_text[max(0,idx-100):idx+300]}")
-                    else:
-                        print("  현대카드 여전히 없음")
+        return card_results
+
+    except Exception as e:
+        print(f"  전체 오류: {e}")
+        return []
+    finally:
+        await page.close()
+
+
+def parse_lotte_detail(detail_text):
+    """롯데홈쇼핑 상세 텍스트에서 핵심 정보 파싱"""
+    lines = [l.strip() for l in detail_text.splitlines() if l.strip()]
+    info = {
+        "date": "",
+        "content": "",
+        "limit": "",
+        "exclude": "",
+    }
+    for i, line in enumerate(lines):
+        if re.match(r"^\d+\.\d+", line) and not info["date"]:
+            info["date"] = line
+        elif "행사내용" in line and i + 1 < len(lines):
+            info["content"] = lines[i + 1]
+        elif "할인한도" in line and i + 1 < len(lines):
+            info["limit"] = lines[i + 1]
+        elif "청구할인 제외" in line and i + 1 < len(lines):
+            info["exclude"] = lines[i + 1]
+    return info
+
+
+def make_lotte_html(lotte_cards):
+    if not lotte_cards:
+        return '<p style="color:#aaa;">수집 실패</p>'
+
+    card_colors = ["#C0392B", "#D4AC0D", "#1A5276", "#117A65", "#6C3483"]
+    cards_html = ""
+
+    for i, card in enumerate(lotte_cards):
+        color = card_colors[i % len(card_colors)]
+        info = parse_lotte_detail(card.get("detail", ""))
+
+        # 할인율 추출
+        pct_match = re.search(r"(\d+)%", card.get("detail", ""))
+        pct = pct_match.group(1) + "%" if pct_match else ""
+
+        detail_rows = ""
+        if info["date"]:
+            detail_rows += f'<tr><td style="color:#999;font-size:12px;padding:3px 0;width:70px;">행사일</td><td style="font-size:12px;padding:3px 0;">{info["date"]}</td></tr>'
+        if info["content"]:
+            detail_rows += f'<tr><td style="color:#999;font-size:12px;padding:3px 0;">내용</td><td style="font-size:12px;padding:3px 0;">{info["content"][:80]}</td></tr>'
+        if info["limit"]:
+            detail_rows += f'<tr><td style="color:#999;font-size:12px;padding:3px 0;">한도</td><td style="font-size:12px;padding:3px 0;">{info["limit"][:60]}</td></tr>'
+
+        cards_html += f"""
+        <div style="display:inline-block;vertical-align:top;margin-right:12px;margin-bottom:12px;
+                    width:200px;border-radius:12px;overflow:hidden;border:1px solid #eee;">
+          <div style="background:{color};padding:16px 20px;">
+            <div style="font-size:13px;color:rgba(255,255,255,0.8);margin-bottom:4px;">{card['card_name']}</div>
+            <div style="font-size:13px;color:rgba(255,255,255,0.8);margin-bottom:8px;">청구할인</div>
+            <div style="font-size:30px;font-weight:700;color:#fff;">{pct}</div>
+          </div>
+          <div style="background:#fff;padding:12px 16px;">
+            <table style="width:100%;border-collapse:collapse;">{detail_rows}</table>
+          </div>
+        </div>"""
+
+    return f'<div style="padding:4px 0;">{cards_html}</div>'
+
+
+def send_email(cj_path, hmall_results, lotte_cards):
+    today_str = datetime.now().strftime("%Y년 %m월 %d일")
+    weekdays = ["월", "화", "수", "목", "금", "토", "일"]
+    weekday = weekdays[datetime.now().weekday()]
+    subject = f"[카드할인봇] {today_str}({weekday}) 홈쇼핑 카드할인"
+
+    msg = MIMEMultipart("related")
+    msg["Subject"] = subject
+    msg["From"] = GMAIL_USER
+    msg["To"] = TO_EMAIL
+
+    cid_map = {}
+
+    if cj_path and os.path.exists(cj_path):
+        cid_map["cj"] = ("img_cj", cj_path)
+        cj_block = '<img src="cid:img_cj" style="max-width:100%;border:1px solid #eee;border-radius:8px;display:block;">'
+    else:
+        cj_block = '<p style="color:#aaa;">수집 실패</p>'
+
+    hmall_blocks = ""
+    if hmall_results:
+        for i, r in enumerate(hmall_results):
+            cid = f"img_hmall_{i}"
+            cid_map[f"hmall_{i}"] = (cid, r["path"])
+            hmall_blocks += f"""
+            <div style="margin-bottom:16px;">
+              <p style="font-size:13px;font-weight:600;color:#185FA5;margin:0 0 6px;
+                        border-left:3px solid #185FA5;padding-left:8px;">{r['card_name']}</p>
+              <img src="cid:{cid}" style="max-width:100%;border:1px solid #eee;border-radius:8px;display:block;">
+            </div>"""
+    else:
+        hmall_blocks = '<p style="color:#aaa;">수집 실패</p>'
+
+    lotte_block = make_lotte_html(lotte_cards)
+
+    html = f"""<html><body style="font-family:'Malgun Gothic',Arial,sans-serif;
+                                  max-width:700px;margin:0 auto;padding:24px;color:#333;">
+      <h2 style="border-bottom:2px solid #eee;padding-bottom:12px;font-size:18px;">
+        홈쇼핑 카드할인 — {today_str}({weekday})
+      </h2>
+      <h3 style="font-size:15px;border-left:4px solid #E24B4A;padding-left:10px;margin-bottom:10px;">
+        CJ온스타일
+      </h3>
+      {cj_block}
+      <h3 style="font-size:15px;border-left:4px solid #185FA5;padding-left:10px;margin:28px 0 10px;">
+        Hmall — 오늘의 카드할인
+      </h3>
+      {hmall_blocks}
+      <h3 style="font-size:15px;border-left:4px solid #C0392B;padding-left:10px;margin:28px 0 10px;">
+        롯데홈쇼핑 — 오늘의 카드 청구할인
+      </h3>
+      {lotte_block}
+      <hr style="border:none;border-top:1px solid #f0f0f0;margin-top:24px;">
+      <p style="font-size:11px;color:#bbb;">카드할인 봇 자동 발송</p>
+    </body></html>"""
+
+    msg.attach(MIMEText(html, "html", "utf-8"))
+
+    for key, (cid, path) in cid_map.items():
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                img = MIMEImage(f.read())
+                img.add_header("Content-ID", f"<{cid}>")
+                img.add_header("Content-Disposition", "inline")
+                msg.attach(img)
+
+    print(f"\n이메일 발송 중 -> {TO_EMAIL}")
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(GMAIL_USER, GMAIL_PASSWORD)
+        smtp.send_message(msg)
+    print("발송 완료!")
+
+
+async def main():
+    print(f"카드할인 봇 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        )
+        context = await browser.new_context(
+            viewport={"width": 390, "height": 844},
+            user_agent=(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/16.0 Mobile/15E148 Safari/604.1"
+            ),
+        )
+
+        cj_path = await capture_cj(browser)
+        hmall_results = await capture_hmall(context)
+        lotte_cards = await collect_lotte(context)
 
         await browser.close()
-        print("\n디버그 완료")
+
+    print(f"\nCJ온스타일: {'성공' if cj_path else '실패'}")
+    print(f"Hmall: {len(hmall_results)}개 카드")
+    print(f"롯데홈쇼핑: {len(lotte_cards)}개 카드")
+
+    if not GMAIL_USER or not GMAIL_PASSWORD or not TO_EMAIL:
+        print("Gmail 환경변수 없음 - 발송 건너뜀")
+        return
+
+    send_email(cj_path, hmall_results, lotte_cards)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
