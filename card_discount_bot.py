@@ -61,7 +61,7 @@ async def capture_site(browser, site_key, cfg):
         ),
     )
     try:
-        print(f"\n[{cfg['name']}] 접속: {cfg['url']}")
+        print(f"[{cfg['name']}] 접속 시작")
         await page.goto(cfg["url"], wait_until="networkidle", timeout=40000)
         await asyncio.sleep(4)
 
@@ -81,7 +81,7 @@ async def capture_site(browser, site_key, cfg):
                     box = await el.bounding_box()
                     if box and box["width"] > 50 and box["height"] > 50:
                         await el.screenshot(path=path)
-                        print(f"  ✅ 셀렉터 적중: {selector}")
+                        print(f"  셀렉터 적중: {selector}")
                         captured = True
                         break
             except Exception:
@@ -89,13 +89,13 @@ async def capture_site(browser, site_key, cfg):
 
         if not captured:
             await page.screenshot(path=path)
-            print(f"  ⚠️ 셀렉터 미적중 — 전체 페이지 캡처")
+            print(f"  [{cfg['name']}] 전체 페이지 캡처")
 
-        print(f"  📸 저장: {path}")
+        print(f"  저장 완료: {path}")
         return path
 
     except Exception as e:
-        print(f"  ❌ 오류: {e}")
+        print(f"  [{cfg['name']}] 오류: {e}")
         return None
     finally:
         await page.close()
@@ -124,41 +124,36 @@ def send_email(screenshots):
             cid_map[site_key] = (cid, path)
             html_blocks.append(f"""
             <div style="margin-bottom:28px;">
-              <h3 style="margin:0 0 10px; font-size:15px; color:#222;
-                         border-left:4px solid #E24B4A; padding-left:10px;">
+              <h3 style="margin:0 0 10px;font-size:15px;color:#222;
+                         border-left:4px solid #E24B4A;padding-left:10px;">
                 {name}
               </h3>
-              <a href="{url}">
-                <img src="cid:{cid}"
-                     style="max-width:100%; border:1px solid #eee;
-                            border-radius:8px; display:block;">
-              </a>
+              <img src="cid:{cid}"
+                   style="max-width:100%;border:1px solid #eee;
+                          border-radius:8px;display:block;">
             </div>""")
         else:
             html_blocks.append(f"""
             <div style="margin-bottom:28px;">
-              <h3 style="margin:0 0 10px; font-size:15px; color:#999;
-                         border-left:4px solid #ccc; padding-left:10px;">
+              <h3 style="margin:0 0 10px;font-size:15px;color:#999;
+                         border-left:4px solid #ccc;padding-left:10px;">
                 {name}
               </h3>
-              <p style="color:#aaa; font-size:13px;">
-                ⚠️ 수집 실패 — <a href="{url}" style="color:#aaa;">직접 확인하기</a>
+              <p style="color:#aaa;font-size:13px;">
+                수집 실패 - <a href="{url}">직접 확인하기</a>
               </p>
             </div>""")
 
-    html = f"""
-    <html><body style="font-family:'Malgun Gothic',Arial,sans-serif;
-                       max-width:700px; margin:0 auto; padding:24px; color:#333;">
-      <h2 style="border-bottom:2px solid #eee; padding-bottom:12px; font-size:18px;">
-        🛒 홈쇼핑 카드할인 — {today_str}({weekday})
+    html = f"""<html><body style="font-family:Arial,sans-serif;max-width:700px;
+                                  margin:0 auto;padding:24px;color:#333;">
+      <h2 style="border-bottom:2px solid #eee;padding-bottom:12px;">
+        홈쇼핑 카드할인 - {today_str}({weekday})
       </h2>
       {''.join(html_blocks)}
-      <hr style="border:none; border-top:1px solid #f0f0f0; margin-top:24px;">
-      <p style="font-size:11px; color:#bbb;">
-        카드할인 봇이 자동 수집한 정보입니다. 실제 혜택은 각 사이트에서 확인하세요.
+      <p style="font-size:11px;color:#bbb;margin-top:24px;">
+        카드할인 봇 자동 발송
       </p>
-    </body></html>
-    """
+    </body></html>"""
 
     msg.attach(MIMEText(html, "html", "utf-8"))
 
@@ -166,4 +161,42 @@ def send_email(screenshots):
         with open(path, "rb") as f:
             img = MIMEImage(f.read())
             img.add_header("Content-ID", f"<{cid}>")
-            img.add_head
+            img.add_header("Content-Disposition", "inline")
+            msg.attach(img)
+
+    print(f"이메일 발송 중 -> {TO_EMAIL}")
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(GMAIL_USER, GMAIL_PASSWORD)
+        smtp.send_message(msg)
+    print("발송 완료!")
+
+
+async def main():
+    print("카드할인 봇 시작")
+    print(f"시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"수신: {TO_EMAIL}")
+
+    screenshots = {}
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        )
+        for key, cfg in SITES.items():
+            screenshots[key] = await capture_site(browser, key, cfg)
+        await browser.close()
+
+    print("수집 완료")
+    for key, path in screenshots.items():
+        status = "성공" if path else "실패"
+        print(f"  {SITES[key]['name']}: {status}")
+
+    if not GMAIL_USER or not GMAIL_PASSWORD or not TO_EMAIL:
+        print("Gmail 환경변수 없음 - 발송 건너뜀")
+        return
+
+    send_email(screenshots)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
