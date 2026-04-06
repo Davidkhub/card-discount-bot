@@ -141,7 +141,7 @@ async def capture_hmall(context):
                 else:
                     today_section = after_today[:500]
                 
-                today_count = today_section.count("즉시할인")
+                today_count = today_section.count("알림신청")
                 print(f"  오늘 섹션 텍스트: {today_section[:200]}")
                 print(f"  오늘 카드 수: {today_count}개")
 
