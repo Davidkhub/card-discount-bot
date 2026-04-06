@@ -1,8 +1,3 @@
-클래스명을 찾았습니다! `benefit_section`이 카드혜택 전체 영역이네요. 바로 수정해 드릴게요.
-
-`card_discount_bot.py`를 아래 코드로 교체해 주세요:
-
-```python
 #!/usr/bin/env python3
 import asyncio
 import smtplib
@@ -26,7 +21,6 @@ SITES = {
             ".benefit_inner",
             ".lst_benefit",
         ],
-        "scroll_to": 0,
     },
 }
 
@@ -177,6 +171,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-```
-
-교체 후 **Run workflow** 눌러주세요. 이번엔 로그에 셀렉터 박스 크기가 출력되니까 결과 보내주시면 캡처 영역이 맞는지 바로 확인할 수 있습니다!
