@@ -5,7 +5,7 @@ from datetime import datetime
 from playwright.async_api import async_playwright
 
 async def main():
-    print("Hmall 카드탭 구조 디버그")
+    print("Hmall HTML 전체 덤프")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -21,15 +21,10 @@ async def main():
             ),
         )
 
-        print("Hmall 접속 중...")
         try:
-            await page.goto(
-                "https://www.hmall.com/md/dpl/index",
-                wait_until="domcontentloaded",
-                timeout=40000,
-            )
+            await page.goto("https://www.hmall.com/md/dpl/index", wait_until="domcontentloaded", timeout=40000)
         except Exception as e:
-            print(f"  goto 예외 무시: {e}")
+            print(f"goto 예외 무시: {e}")
         await asyncio.sleep(5)
 
         os.makedirs("screenshots", exist_ok=True)
@@ -55,34 +50,24 @@ async def main():
         except Exception as e:
             print(f"혜택 탭 클릭 실패: {e}")
 
-        await page.screenshot(path="screenshots/hmall_01_benefit.png")
+        # 전체 텍스트 출력
+        full_text = await page.evaluate("() => document.body.innerText")
+        print("\n=== 전체 텍스트 ===")
+        print(full_text[:5000])
 
-        # "오늘" 텍스트 근처 전체 HTML 구조 출력
-        print("\n오늘 섹션 HTML 구조:")
-        html_structure = await page.evaluate("""
-            () => {
-                // '오늘' 텍스트를 포함한 부모 컨테이너 찾기
-                let todayEl = null;
-                document.querySelectorAll('*').forEach(el => {
-                    if (el.childNodes.length === 1 &&
-                        el.innerText?.trim() === '오늘') {
-                        todayEl = el;
-                    }
-                });
-                if (!todayEl) return 'oday 요소 못 찾음';
-
-                // 부모 컨테이너 5단계 위까지 올라가기
-                let container = todayEl;
-                for (let i = 0; i < 5; i++) {
-                    if (container.parentElement) container = container.parentElement;
-                }
-                return container.outerHTML.slice(0, 3000);
-            }
+        # 전체 링크 중 카드할인 상세 URL 패턴 찾기
+        print("\n=== 모든 링크 ===")
+        links = await page.evaluate("""
+            () => [...document.querySelectorAll('a')].map(a => ({
+                text: a.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 40),
+                href: a.href
+            })).filter(l => l.href && !l.href.endsWith('#') && l.href.includes('hmall'))
         """)
-        print(html_structure)
+        for l in links:
+            print(f"  '{l['text']}' -> {l['href']}")
 
         await browser.close()
-        print("\n디버그 완료")
+        print("\n완료")
 
 if __name__ == "__main__":
     asyncio.run(main())
