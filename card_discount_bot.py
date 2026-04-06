@@ -5,7 +5,7 @@ from datetime import datetime
 from playwright.async_api import async_playwright
 
 async def main():
-    print("Hmall 카드 클릭 이벤트 디버그")
+    print("Hmall 카드 클릭 후 화면 캡처 디버그")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -51,75 +51,87 @@ async def main():
         except Exception as e:
             print(f"혜택 탭 클릭 실패: {e}")
 
-        # 오늘 카드 섹션의 모든 클릭 가능 요소 좌표 찾기
-        print("\n오늘 카드 영역 요소 탐색...")
+        # 카드 섹션으로 스크롤
+        print("카드 섹션으로 스크롤...")
+        await page.evaluate("window.scrollTo(0, 900)")
+        await asyncio.sleep(2)
+        await page.screenshot(path="screenshots/hmall_scrolled.png")
+        print("스크롤 후 스크린샷 저장")
+
+        # 오늘 첫 번째 카드 클릭 (x=90, y=1041 → 스크롤 후 y 재계산)
+        print("\n오늘 첫 번째 카드 클릭...")
         card_elements = await page.evaluate("""
             () => {
                 const results = [];
-                const all = document.querySelectorAll('*');
-                for (const el of all) {
-                    const text = el.innerText?.trim();
-                    // "즉시할인" 텍스트를 포함한 카드 찾기
-                    if (text === '즉시할인') {
-                        const rect = el.getBoundingClientRect();
-                        // 부모로 올라가면서 클릭 가능한 요소 찾기
-                        let clickable = el;
+                document.querySelectorAll('*').forEach(el => {
+                    if (el.innerText?.trim() === '즉시할인') {
+                        let parent = el;
                         for (let i = 0; i < 10; i++) {
-                            clickable = clickable.parentElement;
-                            if (!clickable) break;
-                            const style = window.getComputedStyle(clickable);
-                            if (style.cursor === 'pointer' || clickable.tagName === 'A' || clickable.tagName === 'BUTTON') {
-                                break;
-                            }
+                            parent = parent.parentElement;
+                            if (!parent) break;
+                            const style = window.getComputedStyle(parent);
+                            if (style.cursor === 'pointer') break;
                         }
-                        const crect = clickable ? clickable.getBoundingClientRect() : rect;
+                        const rect = parent ? parent.getBoundingClientRect() : el.getBoundingClientRect();
                         results.push({
-                            tag: clickable?.tagName,
-                            cls: clickable?.className?.toString().slice(0, 60),
-                            x: Math.round(crect.left + crect.width / 2),
-                            y: Math.round(crect.top + crect.height / 2),
-                            width: Math.round(crect.width),
-                            height: Math.round(crect.height),
-                            parentText: clickable?.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 60)
+                            x: Math.round(rect.left + rect.width / 2),
+                            y: Math.round(rect.top + rect.height / 2),
+                            text: parent?.innerText?.trim().replace(/\\s+/g, ' ').slice(0, 40),
+                            inViewport: rect.top >= 0 && rect.top <= 844
                         });
                     }
-                }
+                });
                 return results;
             }
         """)
 
-        print(f"즉시할인 요소 {len(card_elements)}개 발견:")
+        print(f"카드 요소 {len(card_elements)}개:")
         for i, el in enumerate(card_elements):
-            print(f"  [{i}] tag={el['tag']} x={el['x']} y={el['y']} w={el['width']} h={el['height']}")
-            print(f"       cls={el['cls'][:50]}")
-            print(f"       text='{el['parentText']}'")
+            print(f"  [{i}] x={el['x']} y={el['y']} inViewport={el['inViewport']} text='{el['text']}'")
 
-        # 첫 번째 카드(오늘) 좌표 클릭
-        if card_elements:
-            first = card_elements[0]
-            print(f"\n첫 번째 카드 좌표 클릭: ({first['x']}, {first['y']})")
+        # 뷰포트 내 첫 번째 카드 클릭
+        today_cards = [el for el in card_elements if el['inViewport']]
+        if today_cards:
+            target = today_cards[0]
+            print(f"\n클릭: ({target['x']}, {target['y']}) - '{target['text']}'")
+            await page.mouse.click(target['x'], target['y'])
+            await asyncio.sleep(3)
 
-            # 새 페이지 열림 감지
-            try:
-                async with context.expect_page(timeout=5000) as new_page_info:
-                    await page.mouse.click(first['x'], first['y'])
-                new_page = await new_page_info.value
-                await new_page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(3)
-                print(f"  새 페이지 URL: {new_page.url}")
-                await new_page.screenshot(path="screenshots/hmall_card_detail.png", full_page=True)
-                content = await new_page.evaluate("() => document.body.innerText.slice(0, 500)")
-                print(f"  내용:\n{content}")
+            # 화면 변화 캡처
+            await page.screenshot(path="screenshots/hmall_after_click.png")
+            print("클릭 후 스크린샷 저장")
 
-            except Exception as e:
-                print(f"  새 페이지 없음: {e}")
-                # 현재 페이지 URL 변화 확인
-                await page.mouse.click(first['x'], first['y'])
-                await asyncio.sleep(3)
-                print(f"  클릭 후 URL: {page.url}")
-                await page.screenshot(path="screenshots/hmall_card_click.png", full_page=False)
-                content = await page.evaluate("() => document.body.innerText.slice(0, 500)")
-                print(f"  내용:\n{content}")
+            # 모달/패널 열렸는지 확인
+            modal_info = await page.evaluate("""
+                () => {
+                    const dialogs = document.querySelectorAll('[role="dialog"], [class*="modal"], [class*="Modal"], [class*="drawer"], [class*="Drawer"], [class*="panel"], [class*="Panel"]');
+                    const results = [];
+                    dialogs.forEach(el => {
+                        const style = window.getComputedStyle(el);
+                        if (style.display !== 'none' && style.visibility !== 'hidden') {
+                            results.push({
+                                tag: el.tagName,
+                                cls: el.className?.toString().slice(0, 60),
+                                text: el.innerText?.trim().slice(0, 200)
+                            });
+                        }
+                    });
+                    return results;
+                }
+            """)
+            print(f"\n열린 모달/패널 {len(modal_info)}개:")
+            for m in modal_info:
+                print(f"  cls={m['cls'][:50]}")
+                print(f"  text='{m['text'][:150]}'")
+
+            # URL 변화 확인
+            print(f"\n현재 URL: {page.url}")
+
+            # 전체 텍스트 변화 확인
+            content = await page.evaluate("() => document.body.innerText.slice(0, 1000)")
+            print(f"\n페이지 텍스트:\n{content}")
+        else:
+            print("뷰포트 내 카드 없음 - 스크롤 조정 필요")
 
         await browser.close()
         print("\n디버그 완료")
