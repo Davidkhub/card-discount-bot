@@ -155,14 +155,14 @@ async def capture_hmall(browser):
         """)
         print(f"  탭 {len(tabs)}개: {[t['text'] for t in tabs]}")
 
-        for i, tab in enumerate(tabs):
-            print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
-            try:
-                await page.mouse.click(tab['x'], tab['y'])
-                await asyncio.sleep(2)
-                path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
-                await page.screenshot(path=path, full_page=True)
-                results.append({"card_name": tab['text'], "path": path})
+for i, tab in enumerate(tabs):
+    print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
+    try:
+        await page.mouse.click(tab['x'], tab['y'])
+        await asyncio.sleep(4)
+        path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
+        await page.screenshot(path=path, full_page=True)
+        results.append({"card_name": tab['text'], "path": path})
             except Exception as e:
                 print(f"    오류: {e}")
         return results
