@@ -152,7 +152,17 @@ async def capture_hmall(browser):
         for i, tab in enumerate(tabs):
             print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
             try:
-                await page.mouse.click(tab['x'], tab['y'])
+                await page.evaluate(f"""
+                    () => {{
+                        const tabs = [...document.querySelectorAll('a, button, li, div[role="tab"]')]
+                            .filter(el => {{
+                                const text = el.innerText?.trim().replace(/\\s+/g, ' ');
+                                return text && text.length < 30 && /%/.test(text);
+                            }});
+                        if (tabs[{i}]) tabs[{i}].scrollIntoView({{block: 'center', inline: 'center'}});
+                        if (tabs[{i}]) tabs[{i}].click();
+                    }}
+                """)
                 await asyncio.sleep(4)
                 path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
                 await page.screenshot(path=path, full_page=True)
