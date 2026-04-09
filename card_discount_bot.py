@@ -128,6 +128,7 @@ async def capture_hmall(browser):
         await asyncio.sleep(3)
         print(f"  상세 페이지 URL: {page.url}")
 
+        # 탭 찾기 - % 포함 탭 우선, 없으면 카드사명 탭
         tabs = await page.evaluate("""
             () => {
                 const results = [];
@@ -148,6 +149,15 @@ async def capture_hmall(browser):
             }
         """)
         print(f"  탭 {len(tabs)}개: {[t['text'] for t in tabs]}")
+
+        # 탭이 0개면 현재 페이지 자체가 단일 카드 상세 페이지 → 바로 스크린샷
+        if len(tabs) == 0:
+            print("  탭 없음 - 현재 페이지 단일 카드로 스크린샷")
+            path = os.path.join(SCREENSHOT_DIR, f"hmall_0_{today}.png")
+            await page.screenshot(path=path, full_page=True)
+            card_name = first['text'].replace('즉시할인', '').strip()
+            results.append({"card_name": card_name, "path": path})
+            return results
 
         for i, tab in enumerate(tabs):
             print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
@@ -255,17 +265,21 @@ async def collect_lotte(browser):
             print("  상세 페이지 이동 실패 - 텍스트 정보만 발송")
             return cards
 
+        # 탭 찾기 - 카드사명 기준 (마이롯데 제외)
         tabs = await page.evaluate("""
             () => {
                 const seen = new Set();
                 const results = [];
+                const excluded = ['마이롯데', '마이페이지', '홈', '장바구니'];
                 document.querySelectorAll('a, button, li').forEach(el => {
                     const text = el.innerText?.trim().replace(/\\s+/g, ' ');
-                    if (text && text.length < 15 && (
+                    if (text && text.length < 15 &&
+                        !excluded.includes(text) && (
                         text.includes('롯데') || text.includes('KB') ||
                         text.includes('현대') || text.includes('삼성') ||
                         text.includes('신한') || text.includes('하나') ||
-                        text.includes('마이롯데')
+                        text.includes('NH') || text.includes('농협') ||
+                        text.includes('카드')
                     )) {
                         const rect = el.getBoundingClientRect();
                         if (rect.width > 30 && rect.height > 10 && !seen.has(text)) {
@@ -282,6 +296,14 @@ async def collect_lotte(browser):
             }
         """)
         print(f"  상세 탭 {len(tabs)}개: {[t['text'] for t in tabs]}")
+
+        # 탭이 없으면 현재 페이지 텍스트만 수집
+        if not tabs:
+            print("  탭 없음 - 현재 페이지 텍스트 수집")
+            detail = await page.evaluate("() => document.body.innerText.trim().slice(0, 800)")
+            for card in cards:
+                card["detail"] = detail
+            return cards
 
         for i, tab in enumerate(tabs):
             print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
