@@ -45,28 +45,30 @@ async def capture_cj(browser):
                     window.scrollTo(0, pos);
                     await new Promise(r => setTimeout(r, 300));
                 }
-                window.scrollTo(0, document.body.scrollHeight);
-                await new Promise(r => setTimeout(r, 1000));
+                window.scrollTo(0, 0);
+                await new Promise(r => setTimeout(r, 500));
             }
         """)
-        await asyncio.sleep(3)
+        await asyncio.sleep(2)
 
-        # "카드 혜택" 텍스트 가진 item_card 항목들의 위치 찾기
+        # 상단 카드혜택 swiper 찾기 (y < 1000)
         card_info = await page.evaluate("""
             () => {
-                // 모든 swiper-slide 또는 item_card 중 카드혜택만 필터링
                 const items = document.querySelectorAll('.item_card, .swiper-slide, li');
                 const cardItems = [];
                 items.forEach(item => {
                     const text = item.innerText || '';
-                    if ((text.includes('카드 혜택') || text.includes('카드혜택') || text.includes('즉시할인')) 
+                    if ((text.includes('카드 혜택') || text.includes('카드혜택')) 
+                        && text.includes('즉시할인')
                         && !text.includes('쿠폰') && !text.includes('Welcome') && !text.includes('Member')
+                        && !text.includes('오늘 종료') && !text.includes('1일 남음')
                         && text.length < 200) {
                         const rect = item.getBoundingClientRect();
-                        if (rect.width > 30 && rect.height > 30) {
+                        const absY = rect.top + window.scrollY;
+                        if (rect.width > 30 && rect.height > 30 && absY < 2000) {
                             cardItems.push({
                                 x: Math.round(rect.left),
-                                y: Math.round(rect.top + window.scrollY),
+                                y: Math.round(absY),
                                 width: Math.round(rect.width),
                                 height: Math.round(rect.height),
                                 text: text.replace(/\\n/g, ' ').slice(0, 80)
@@ -78,78 +80,128 @@ async def capture_cj(browser):
             }
         """)
 
-        print(f"  카드혜택 항목 {len(card_info)}개:")
-        for c in card_info[:10]:
+        print(f"  상단 카드혜택 항목 {len(card_info)}개:")
+        for c in card_info:
             print(f"    x={c['x']} y={c['y']} w={c['width']} h={c['height']} text='{c['text'][:50]}'")
 
         captured = False
 
         if card_info:
-            # 가장 작은 y, 가장 큰 y+height로 영역 계산
-            xs = [c['x'] for c in card_info]
-            ys = [c['y'] for c in card_info]
-            x_ends = [c['x'] + c['width'] for c in card_info]
-            y_ends = [c['y'] + c['height'] for c in card_info]
-
-            min_x = min(xs)
-            min_y = min(ys)
-            max_x = max(x_ends)
-            max_y = max(y_ends)
-
-            print(f"  카드혜택 종합 영역: x={min_x} y={min_y} ~ x={max_x} y={max_y}")
-
-            # 해당 영역으로 스크롤
-            await page.evaluate(f"window.scrollTo(0, {max(0, min_y - 80)})")
-            await asyncio.sleep(2)
-
-            # 스크롤 후 좌표 재계산
-            new_info = await page.evaluate("""
+            # 첫 번째 카드 항목의 부모 swiper 컨테이너 찾기
+            swiper_box = await page.evaluate("""
                 () => {
                     const items = document.querySelectorAll('.item_card, .swiper-slide, li');
-                    const cardItems = [];
-                    items.forEach(item => {
+                    for (const item of items) {
                         const text = item.innerText || '';
-                        if ((text.includes('카드 혜택') || text.includes('카드혜택') || text.includes('즉시할인')) 
-                            && !text.includes('쿠폰') && !text.includes('Welcome') && !text.includes('Member')
+                        if ((text.includes('카드 혜택') || text.includes('카드혜택')) 
+                            && text.includes('즉시할인')
+                            && !text.includes('쿠폰') && !text.includes('Welcome')
+                            && !text.includes('오늘 종료') && !text.includes('1일 남음')
                             && text.length < 200) {
                             const rect = item.getBoundingClientRect();
-                            if (rect.width > 30 && rect.height > 30) {
-                                cardItems.push({
-                                    x: Math.round(rect.left),
-                                    y: Math.round(rect.top),
-                                    width: Math.round(rect.width),
-                                    height: Math.round(rect.height)
-                                });
+                            const absY = rect.top + window.scrollY;
+                            if (absY < 2000) {
+                                // 부모 swiper-container 또는 lst_benefit 찾기
+                                let parent = item.parentElement;
+                                for (let i = 0; i < 8; i++) {
+                                    if (!parent) break;
+                                    if (parent.classList.contains('swiper-container') ||
+                                        parent.classList.contains('lst_benefit') ||
+                                        parent.classList.contains('module_bx')) {
+                                        const r = parent.getBoundingClientRect();
+                                        return {
+                                            x: Math.round(r.left),
+                                            y: Math.round(r.top + window.scrollY),
+                                            width: Math.round(r.width),
+                                            height: Math.round(r.height),
+                                            cls: parent.className
+                                        };
+                                    }
+                                    parent = parent.parentElement;
+                                }
                             }
                         }
-                    });
-                    return cardItems;
+                    }
+                    return null;
                 }
             """)
+            print(f"  swiper 컨테이너: {swiper_box}")
 
-            if new_info:
-                xs = [c['x'] for c in new_info]
-                ys = [c['y'] for c in new_info]
-                x_ends = [c['x'] + c['width'] for c in new_info]
-                y_ends = [c['y'] + c['height'] for c in new_info]
+            if swiper_box:
+                # 카드 swiper로 스크롤 (왼쪽 끝으로 가로 스크롤도)
+                await page.evaluate(f"window.scrollTo(0, {max(0, swiper_box['y'] - 100)})")
+                await asyncio.sleep(1)
 
-                clip_x = max(0, min(xs) - 5)
-                clip_y = max(0, min(ys) - 30)
-                clip_w = min(390 - clip_x, max(x_ends) - clip_x + 10)
-                clip_h = min(844 - clip_y, max(y_ends) - clip_y + 30)
-
-                if clip_w > 30 and clip_h > 30:
-                    await page.screenshot(
-                        path=path,
-                        clip={
-                            "x": clip_x,
-                            "y": clip_y,
-                            "width": clip_w,
-                            "height": clip_h,
+                # 스와이퍼를 가로로 스크롤해서 카드 부분 보이게
+                await page.evaluate("""
+                    () => {
+                        const items = document.querySelectorAll('.item_card, .swiper-slide, li');
+                        for (const item of items) {
+                            const text = item.innerText || '';
+                            if ((text.includes('카드 혜택') || text.includes('카드혜택')) 
+                                && text.includes('즉시할인')
+                                && !text.includes('쿠폰') && !text.includes('Welcome')
+                                && text.length < 200) {
+                                item.scrollIntoView({block: 'center', inline: 'center'});
+                                break;
+                            }
                         }
-                    )
-                    print(f"  카드혜택 클립 캡처 성공 ({clip_w}x{clip_h})")
-                    captured = True
+                    }
+                """)
+                await asyncio.sleep(2)
+
+                # 다시 좌표 얻기
+                final_box = await page.evaluate(f"""
+                    () => {{
+                        const items = document.querySelectorAll('.item_card, .swiper-slide, li');
+                        const found = [];
+                        items.forEach(item => {{
+                            const text = item.innerText || '';
+                            if ((text.includes('카드 혜택') || text.includes('카드혜택')) 
+                                && text.includes('즉시할인')
+                                && !text.includes('쿠폰') && !text.includes('Welcome')
+                                && !text.includes('오늘 종료') && !text.includes('1일 남음')
+                                && text.length < 200) {{
+                                const rect = item.getBoundingClientRect();
+                                if (rect.width > 30 && rect.height > 30 && rect.top > -200 && rect.top < 1000) {{
+                                    found.push({{
+                                        x: Math.round(rect.left),
+                                        y: Math.round(rect.top),
+                                        width: Math.round(rect.width),
+                                        height: Math.round(rect.height)
+                                    }});
+                                }}
+                            }}
+                        }});
+                        return found;
+                    }}
+                """)
+
+                print(f"  최종 카드 위치 {len(final_box)}개:")
+                for c in final_box:
+                    print(f"    x={c['x']} y={c['y']} w={c['width']} h={c['height']}")
+
+                if final_box:
+                    xs = [c['x'] for c in final_box]
+                    ys = [c['y'] for c in final_box]
+                    x_ends = [c['x'] + c['width'] for c in final_box]
+                    y_ends = [c['y'] + c['height'] for c in final_box]
+
+                    clip_x = max(0, min(xs) - 5)
+                    clip_y = max(0, min(ys) - 30)
+                    clip_w = min(390 - clip_x, max(x_ends) - clip_x + 10)
+                    clip_h = min(844 - clip_y, max(y_ends) - clip_y + 30)
+
+                    if clip_w > 30 and clip_h > 30:
+                        await page.screenshot(
+                            path=path,
+                            clip={
+                                "x": clip_x, "y": clip_y,
+                                "width": clip_w, "height": clip_h,
+                            }
+                        )
+                        print(f"  카드혜택 클립 캡처 성공 ({clip_w}x{clip_h})")
+                        captured = True
 
         if not captured:
             await page.screenshot(path=path)
