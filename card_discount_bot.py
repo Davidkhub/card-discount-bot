@@ -34,97 +34,96 @@ async def capture_cj(browser):
         today = datetime.now().strftime("%Y%m%d")
         path = os.path.join(SCREENSHOT_DIR, f"cj_{today}.png")
 
-        # 페이지 맨 아래로 스크롤
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        await asyncio.sleep(2)
+        # 페이지 전체를 천천히 스크롤하면서 lazy-load 트리거
+        print("  페이지 lazy-load 스크롤...")
+        await page.evaluate("""
+            async () => {
+                const totalHeight = document.body.scrollHeight;
+                let pos = 0;
+                while (pos < totalHeight) {
+                    pos += 400;
+                    window.scrollTo(0, pos);
+                    await new Promise(r => setTimeout(r, 300));
+                }
+                window.scrollTo(0, document.body.scrollHeight);
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        """)
+        await asyncio.sleep(3)
 
-        captured = False
-
-        # "카드 혜택" 텍스트가 있는 H4(blind) 요소 기준으로 카드 영역만 찾기
-        card_area_box = await page.evaluate("""
+        # 모든 lst_benefit 분석
+        all_lists = await page.evaluate("""
             () => {
-                // "카드 혜택" 텍스트를 가진 H4 또는 그 근처 요소 찾기
-                const headings = document.querySelectorAll('h3, h4, strong, .blind');
-                for (const h of headings) {
-                    const text = h.innerText?.trim();
-                    if (text === '카드 혜택' || text === '카드혜택') {
-                        // 부모로 올라가면서 카드 리스트가 포함된 컨테이너 찾기
-                        let parent = h.parentElement;
-                        for (let i = 0; i < 6; i++) {
-                            if (!parent) break;
-                            const lst = parent.querySelector('.lst_benefit');
-                            if (lst) {
-                                const rect = lst.getBoundingClientRect();
-                                return {
-                                    x: Math.round(rect.left),
-                                    y: Math.round(rect.top + window.scrollY),
-                                    width: Math.round(rect.width),
-                                    height: Math.round(rect.height),
-                                    found: 'h4_to_lst'
-                                };
-                            }
-                            parent = parent.parentElement;
-                        }
-                    }
-                }
-                
-                // fallback: lst_benefit 직접 찾기 (즉시할인 텍스트 포함된 것)
-                const lists = document.querySelectorAll('.lst_benefit');
-                for (const lst of lists) {
+                const results = [];
+                document.querySelectorAll('.lst_benefit').forEach((lst, idx) => {
                     const text = lst.innerText || '';
-                    if (text.includes('즉시할인')) {
-                        const rect = lst.getBoundingClientRect();
-                        return {
-                            x: Math.round(rect.left),
-                            y: Math.round(rect.top + window.scrollY),
-                            width: Math.round(rect.width),
-                            height: Math.round(rect.height),
-                            found: 'lst_direct'
-                        };
-                    }
-                }
-                return null;
+                    const rect = lst.getBoundingClientRect();
+                    results.push({
+                        index: idx,
+                        text: text.slice(0, 200).replace(/\\n/g, ' | '),
+                        y: Math.round(rect.top + window.scrollY),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height),
+                        hasCard: text.includes('즉시할인') || text.includes('카드 혜택') || text.includes('카드혜택')
+                    });
+                });
+                return results;
             }
         """)
 
-        print(f"  카드 영역: {card_area_box}")
+        print(f"  lst_benefit {len(all_lists)}개 발견:")
+        for l in all_lists:
+            print(f"    [{l['index']}] y={l['y']} h={l['height']} hasCard={l['hasCard']} text='{l['text'][:80]}'")
 
-        if card_area_box and card_area_box['height'] > 30:
+        # 즉시할인 텍스트가 있는 lst_benefit 선택
+        target_idx = -1
+        for l in all_lists:
+            if l['hasCard']:
+                target_idx = l['index']
+                break
+
+        captured = False
+        if target_idx >= 0:
+            target_y = all_lists[target_idx]['y']
+            print(f"  타겟 lst_benefit[{target_idx}] - y={target_y}")
+
             # 해당 위치로 스크롤
-            await page.evaluate(f"window.scrollTo(0, {card_area_box['y'] - 100})")
+            await page.evaluate(f"window.scrollTo(0, {max(0, target_y - 80)})")
             await asyncio.sleep(2)
 
-            # 스크롤 후 다시 좌표 얻기
-            new_box = await page.evaluate("""
-                () => {
+            # 다시 좌표 얻기
+            new_box = await page.evaluate(f"""
+                () => {{
                     const lists = document.querySelectorAll('.lst_benefit');
-                    for (const lst of lists) {
-                        const text = lst.innerText || '';
-                        if (text.includes('즉시할인')) {
-                            const rect = lst.getBoundingClientRect();
-                            return {
-                                x: Math.round(rect.left),
-                                y: Math.round(rect.top),
-                                width: Math.round(rect.width),
-                                height: Math.round(rect.height)
-                            };
-                        }
-                    }
-                    return null;
-                }
+                    const lst = lists[{target_idx}];
+                    if (!lst) return null;
+                    const rect = lst.getBoundingClientRect();
+                    return {{
+                        x: Math.round(rect.left),
+                        y: Math.round(rect.top),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height)
+                    }};
+                }}
             """)
+            print(f"  스크롤 후 박스: {new_box}")
 
             if new_box and new_box['height'] > 30:
+                clip_x = max(0, new_box['x'] - 10)
+                clip_y = max(0, new_box['y'] - 40)  # 타이틀 포함하기 위해 위쪽 여백
+                clip_w = min(390 - clip_x, new_box['width'] + 20)
+                clip_h = min(844 - clip_y, new_box['height'] + 60)
+
                 await page.screenshot(
                     path=path,
                     clip={
-                        "x": max(0, new_box['x'] - 10),
-                        "y": max(0, new_box['y'] - 10),
-                        "width": min(390, new_box['width'] + 20),
-                        "height": new_box['height'] + 20,
+                        "x": clip_x,
+                        "y": clip_y,
+                        "width": clip_w,
+                        "height": clip_h,
                     }
                 )
-                print(f"  카드혜택 영역 클립 캡처 성공 (높이: {new_box['height']}px)")
+                print(f"  카드혜택 클립 캡처 성공 ({clip_w}x{clip_h})")
                 captured = True
 
         if not captured:
