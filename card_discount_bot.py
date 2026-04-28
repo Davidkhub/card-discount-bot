@@ -40,44 +40,92 @@ async def capture_cj(browser):
 
         captured = False
 
-        # lst_benefit (카드 혜택 리스트) 직접 찾기
-        lst = await page.query_selector(".lst_benefit")
-        if lst:
-            card_area = await page.evaluate_handle("""
+        # "카드 혜택" 텍스트가 있는 H4(blind) 요소 기준으로 카드 영역만 찾기
+        card_area_box = await page.evaluate("""
+            () => {
+                // "카드 혜택" 텍스트를 가진 H4 또는 그 근처 요소 찾기
+                const headings = document.querySelectorAll('h3, h4, strong, .blind');
+                for (const h of headings) {
+                    const text = h.innerText?.trim();
+                    if (text === '카드 혜택' || text === '카드혜택') {
+                        // 부모로 올라가면서 카드 리스트가 포함된 컨테이너 찾기
+                        let parent = h.parentElement;
+                        for (let i = 0; i < 6; i++) {
+                            if (!parent) break;
+                            const lst = parent.querySelector('.lst_benefit');
+                            if (lst) {
+                                const rect = lst.getBoundingClientRect();
+                                return {
+                                    x: Math.round(rect.left),
+                                    y: Math.round(rect.top + window.scrollY),
+                                    width: Math.round(rect.width),
+                                    height: Math.round(rect.height),
+                                    found: 'h4_to_lst'
+                                };
+                            }
+                            parent = parent.parentElement;
+                        }
+                    }
+                }
+                
+                // fallback: lst_benefit 직접 찾기 (즉시할인 텍스트 포함된 것)
+                const lists = document.querySelectorAll('.lst_benefit');
+                for (const lst of lists) {
+                    const text = lst.innerText || '';
+                    if (text.includes('즉시할인')) {
+                        const rect = lst.getBoundingClientRect();
+                        return {
+                            x: Math.round(rect.left),
+                            y: Math.round(rect.top + window.scrollY),
+                            width: Math.round(rect.width),
+                            height: Math.round(rect.height),
+                            found: 'lst_direct'
+                        };
+                    }
+                }
+                return null;
+            }
+        """)
+
+        print(f"  카드 영역: {card_area_box}")
+
+        if card_area_box and card_area_box['height'] > 30:
+            # 해당 위치로 스크롤
+            await page.evaluate(f"window.scrollTo(0, {card_area_box['y'] - 100})")
+            await asyncio.sleep(2)
+
+            # 스크롤 후 다시 좌표 얻기
+            new_box = await page.evaluate("""
                 () => {
-                    const sections = document.querySelectorAll('.benefit_section');
-                    for (const sec of sections) {
-                        const lst = sec.querySelector('.lst_benefit');
-                        if (lst) return lst.parentElement || lst;
+                    const lists = document.querySelectorAll('.lst_benefit');
+                    for (const lst of lists) {
+                        const text = lst.innerText || '';
+                        if (text.includes('즉시할인')) {
+                            const rect = lst.getBoundingClientRect();
+                            return {
+                                x: Math.round(rect.left),
+                                y: Math.round(rect.top),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height)
+                            };
+                        }
                     }
                     return null;
                 }
             """)
-            if card_area:
-                box = await card_area.bounding_box()
-                print(f"  카드혜택 영역 발견 (높이: {box['height'] if box else 0}px)")
-                if box and box["width"] > 50 and box["height"] > 50:
-                    await card_area.screenshot(path=path)
-                    print("  lst_benefit 부모 캡처 성공")
-                    captured = True
 
-        # fallback: module_bx 중 즉시할인 텍스트 포함된 것
-        if not captured:
-            modules = await page.query_selector_all(".module_bx")
-            for module in modules:
-                try:
-                    text = await module.inner_text()
-                    if '즉시할인' in text and len(text) < 300:
-                        await module.scroll_into_view_if_needed()
-                        await asyncio.sleep(1)
-                        box = await module.bounding_box()
-                        if box and box["width"] > 50 and box["height"] > 50:
-                            await module.screenshot(path=path)
-                            print(f"  module_bx 캡처 성공 (높이: {box['height']}px)")
-                            captured = True
-                            break
-                except Exception:
-                    continue
+            if new_box and new_box['height'] > 30:
+                await page.screenshot(
+                    path=path,
+                    clip={
+                        "x": max(0, new_box['x'] - 10),
+                        "y": max(0, new_box['y'] - 10),
+                        "width": min(390, new_box['width'] + 20),
+                        "height": new_box['height'] + 20,
+                    }
+                )
+                print(f"  카드혜택 영역 클립 캡처 성공 (높이: {new_box['height']}px)")
+                captured = True
 
         if not captured:
             await page.screenshot(path=path)
