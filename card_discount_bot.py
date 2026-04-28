@@ -34,7 +34,7 @@ async def capture_cj(browser):
         today = datetime.now().strftime("%Y%m%d")
         path = os.path.join(SCREENSHOT_DIR, f"cj_{today}.png")
 
-        # 페이지 전체를 천천히 스크롤하면서 lazy-load 트리거
+        # lazy-load 스크롤
         print("  페이지 lazy-load 스크롤...")
         await page.evaluate("""
             async () => {
@@ -51,80 +51,105 @@ async def capture_cj(browser):
         """)
         await asyncio.sleep(3)
 
-        # 모든 lst_benefit 분석
-        all_lists = await page.evaluate("""
+        # "카드 혜택" 텍스트 가진 item_card 항목들의 위치 찾기
+        card_info = await page.evaluate("""
             () => {
-                const results = [];
-                document.querySelectorAll('.lst_benefit').forEach((lst, idx) => {
-                    const text = lst.innerText || '';
-                    const rect = lst.getBoundingClientRect();
-                    results.push({
-                        index: idx,
-                        text: text.slice(0, 200).replace(/\\n/g, ' | '),
-                        y: Math.round(rect.top + window.scrollY),
-                        width: Math.round(rect.width),
-                        height: Math.round(rect.height),
-                        hasCard: text.includes('즉시할인') || text.includes('카드 혜택') || text.includes('카드혜택')
-                    });
+                // 모든 swiper-slide 또는 item_card 중 카드혜택만 필터링
+                const items = document.querySelectorAll('.item_card, .swiper-slide, li');
+                const cardItems = [];
+                items.forEach(item => {
+                    const text = item.innerText || '';
+                    if ((text.includes('카드 혜택') || text.includes('카드혜택') || text.includes('즉시할인')) 
+                        && !text.includes('쿠폰') && !text.includes('Welcome') && !text.includes('Member')
+                        && text.length < 200) {
+                        const rect = item.getBoundingClientRect();
+                        if (rect.width > 30 && rect.height > 30) {
+                            cardItems.push({
+                                x: Math.round(rect.left),
+                                y: Math.round(rect.top + window.scrollY),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height),
+                                text: text.replace(/\\n/g, ' ').slice(0, 80)
+                            });
+                        }
+                    }
                 });
-                return results;
+                return cardItems;
             }
         """)
 
-        print(f"  lst_benefit {len(all_lists)}개 발견:")
-        for l in all_lists:
-            print(f"    [{l['index']}] y={l['y']} h={l['height']} hasCard={l['hasCard']} text='{l['text'][:80]}'")
-
-        # 즉시할인 텍스트가 있는 lst_benefit 선택
-        target_idx = -1
-        for l in all_lists:
-            if l['hasCard']:
-                target_idx = l['index']
-                break
+        print(f"  카드혜택 항목 {len(card_info)}개:")
+        for c in card_info[:10]:
+            print(f"    x={c['x']} y={c['y']} w={c['width']} h={c['height']} text='{c['text'][:50]}'")
 
         captured = False
-        if target_idx >= 0:
-            target_y = all_lists[target_idx]['y']
-            print(f"  타겟 lst_benefit[{target_idx}] - y={target_y}")
 
-            # 해당 위치로 스크롤
-            await page.evaluate(f"window.scrollTo(0, {max(0, target_y - 80)})")
+        if card_info:
+            # 가장 작은 y, 가장 큰 y+height로 영역 계산
+            xs = [c['x'] for c in card_info]
+            ys = [c['y'] for c in card_info]
+            x_ends = [c['x'] + c['width'] for c in card_info]
+            y_ends = [c['y'] + c['height'] for c in card_info]
+
+            min_x = min(xs)
+            min_y = min(ys)
+            max_x = max(x_ends)
+            max_y = max(y_ends)
+
+            print(f"  카드혜택 종합 영역: x={min_x} y={min_y} ~ x={max_x} y={max_y}")
+
+            # 해당 영역으로 스크롤
+            await page.evaluate(f"window.scrollTo(0, {max(0, min_y - 80)})")
             await asyncio.sleep(2)
 
-            # 다시 좌표 얻기
-            new_box = await page.evaluate(f"""
-                () => {{
-                    const lists = document.querySelectorAll('.lst_benefit');
-                    const lst = lists[{target_idx}];
-                    if (!lst) return null;
-                    const rect = lst.getBoundingClientRect();
-                    return {{
-                        x: Math.round(rect.left),
-                        y: Math.round(rect.top),
-                        width: Math.round(rect.width),
-                        height: Math.round(rect.height)
-                    }};
-                }}
+            # 스크롤 후 좌표 재계산
+            new_info = await page.evaluate("""
+                () => {
+                    const items = document.querySelectorAll('.item_card, .swiper-slide, li');
+                    const cardItems = [];
+                    items.forEach(item => {
+                        const text = item.innerText || '';
+                        if ((text.includes('카드 혜택') || text.includes('카드혜택') || text.includes('즉시할인')) 
+                            && !text.includes('쿠폰') && !text.includes('Welcome') && !text.includes('Member')
+                            && text.length < 200) {
+                            const rect = item.getBoundingClientRect();
+                            if (rect.width > 30 && rect.height > 30) {
+                                cardItems.push({
+                                    x: Math.round(rect.left),
+                                    y: Math.round(rect.top),
+                                    width: Math.round(rect.width),
+                                    height: Math.round(rect.height)
+                                });
+                            }
+                        }
+                    });
+                    return cardItems;
+                }
             """)
-            print(f"  스크롤 후 박스: {new_box}")
 
-            if new_box and new_box['height'] > 30:
-                clip_x = max(0, new_box['x'] - 10)
-                clip_y = max(0, new_box['y'] - 40)  # 타이틀 포함하기 위해 위쪽 여백
-                clip_w = min(390 - clip_x, new_box['width'] + 20)
-                clip_h = min(844 - clip_y, new_box['height'] + 60)
+            if new_info:
+                xs = [c['x'] for c in new_info]
+                ys = [c['y'] for c in new_info]
+                x_ends = [c['x'] + c['width'] for c in new_info]
+                y_ends = [c['y'] + c['height'] for c in new_info]
 
-                await page.screenshot(
-                    path=path,
-                    clip={
-                        "x": clip_x,
-                        "y": clip_y,
-                        "width": clip_w,
-                        "height": clip_h,
-                    }
-                )
-                print(f"  카드혜택 클립 캡처 성공 ({clip_w}x{clip_h})")
-                captured = True
+                clip_x = max(0, min(xs) - 5)
+                clip_y = max(0, min(ys) - 30)
+                clip_w = min(390 - clip_x, max(x_ends) - clip_x + 10)
+                clip_h = min(844 - clip_y, max(y_ends) - clip_y + 30)
+
+                if clip_w > 30 and clip_h > 30:
+                    await page.screenshot(
+                        path=path,
+                        clip={
+                            "x": clip_x,
+                            "y": clip_y,
+                            "width": clip_w,
+                            "height": clip_h,
+                        }
+                    )
+                    print(f"  카드혜택 클립 캡처 성공 ({clip_w}x{clip_h})")
+                    captured = True
 
         if not captured:
             await page.screenshot(path=path)
