@@ -14,8 +14,8 @@ GMAIL_PASSWORD = os.environ.get("GMAIL_PASSWORD", "")
 TO_EMAIL       = os.environ.get("TO_EMAIL", "")
 SCREENSHOT_DIR = "screenshots"
 
-PC_UA  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-MOB_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+PC_UA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+MOB_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
 
 async def capture_cj(browser):
@@ -39,31 +39,69 @@ async def capture_cj(browser):
         await asyncio.sleep(2)
 
         captured = False
+
         # benefit_section 중 카드혜택 포함된 섹션 찾기
+        # 여러 개일 수 있으므로 카드/즉시할인 텍스트 포함된 것 선택
         sections = await page.query_selector_all(".benefit_section")
         print(f"  benefit_section {len(sections)}개 발견")
+
         for section in sections:
             try:
                 text = await section.inner_text()
                 if '카드' in text or '즉시할인' in text:
+                    # 섹션을 뷰포트에 보이게 스크롤
+                    await section.scroll_into_view_if_needed()
+                    await asyncio.sleep(1)
                     box = await section.bounding_box()
+                    print(f"  카드혜택 섹션 발견 (높이: {box['height'] if box else 0}px)")
                     if box and box["width"] > 50 and box["height"] > 50:
                         await section.screenshot(path=path)
-                        print(f"  카드혜택 섹션 캡처 성공 (높이: {box['height']}px)")
+                        print(f"  캡처 성공")
                         captured = True
                         break
-            except Exception:
+            except Exception as e:
+                print(f"  섹션 오류: {e}")
                 continue
 
         if not captured:
-            el = await page.query_selector(".lst_benefit")
-            if el:
-                parent = await el.evaluate_handle("el => el.closest('.benefit_section') || el.parentElement")
-                box = await parent.bounding_box() if parent else None
-                if box and box["width"] > 50 and box["height"] > 50:
-                    await parent.screenshot(path=path)
-                    print("  lst_benefit 부모 캡처 성공")
-                    captured = True
+            # module_bx 클래스로 카드혜택 영역 찾기
+            modules = await page.query_selector_all(".module_bx")
+            for module in modules:
+                try:
+                    text = await module.inner_text()
+                    if ('카드' in text or '즉시할인' in text) and len(text) < 500:
+                        await module.scroll_into_view_if_needed()
+                        await asyncio.sleep(1)
+                        box = await module.bounding_box()
+                        if box and box["width"] > 50 and box["height"] > 50:
+                            await module.screenshot(path=path)
+                            print(f"  module_bx 캡처 성공 (높이: {box['height']}px)")
+                            captured = True
+                            break
+                except Exception:
+                    continue
+
+        if not captured:
+            # 카드혜택 섹션 전체 HTML에서 위치 찾아서 뷰포트 캡처
+            card_y = await page.evaluate("""
+                () => {
+                    const all = document.querySelectorAll('*');
+                    for (const el of all) {
+                        const text = el.innerText?.trim();
+                        if (text && text.includes('카드') && text.includes('즉시할인') && text.length < 200) {
+                            const rect = el.getBoundingClientRect();
+                            return window.scrollY + rect.top;
+                        }
+                    }
+                    return -1;
+                }
+            """)
+            if card_y > 0:
+                await page.evaluate(f"window.scrollTo(0, {card_y - 50})")
+                await asyncio.sleep(1)
+                await page.screenshot(path=path)
+                print(f"  좌표 기반 캡처 (y={card_y})")
+                captured = True
 
         if not captured:
             await page.screenshot(path=path)
@@ -194,6 +232,11 @@ async def capture_hmall(browser):
                 await asyncio.sleep(4)
                 path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
                 await page.screenshot(path=path, full_page=True)
+                # 403 에러 확인
+                page_text = await page.evaluate("() => document.body.innerText.slice(0, 100)")
+                if "403" in page_text or "ERROR" in page_text:
+                    print(f"    403 에러 감지 - 건너뜀")
+                    continue
                 results.append({"card_name": tab['text'], "path": path})
             except Exception as e:
                 print(f"    오류: {e}")
@@ -296,6 +339,7 @@ async def collect_lotte(browser):
                         text.includes('현대') || text.includes('삼성') ||
                         text.includes('신한') || text.includes('하나') ||
                         text.includes('NH') || text.includes('농협') ||
+                        text.includes('비씨') || text.includes('BC') ||
                         text.includes('카드')
                     )) {
                         const rect = el.getBoundingClientRect();
