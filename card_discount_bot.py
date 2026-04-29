@@ -34,126 +34,103 @@ async def capture_cj(browser):
         today = datetime.now().strftime("%Y%m%d")
         path = os.path.join(SCREENSHOT_DIR, f"cj_{today}.png")
 
-        # 1200px 스크롤 후 카드/결제혜택 탭 클릭
-        await page.evaluate("window.scrollTo(0, 1200)")
-        await asyncio.sleep(2)
-
-        tab_clicked = await page.evaluate("""
-            () => {
-                const all = document.querySelectorAll('a, button, span, div, li');
-                for (const el of all) {
-                    const text = el.innerText?.trim();
-                    if (text === '카드/결제혜택') {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 0 && rect.top > 0 && rect.top < 844) {
-                            el.click();
-                            return { x: Math.round(rect.left + rect.width/2), y: Math.round(rect.top + rect.height/2), text };
-                        }
-                    }
-                }
-                return null;
-            }
-        """)
-        print(f"  카드/결제혜택 탭 클릭: {tab_clicked}")
-        await asyncio.sleep(3)
-
-        # 카드 영역의 절대 좌표(scrollY 포함) 먼저 찾기
-        captured = False
-        for scroll_y in [1200, 1400, 1600, 1800, 2000, 2200, 2500, 3000]:
+        # 스크롤하면서 카드/결제혜택 탭 찾아 클릭
+        tab_found = False
+        for scroll_y in [0, 400, 800, 1200, 1600]:
             await page.evaluate(f"window.scrollTo(0, {scroll_y})")
             await asyncio.sleep(1)
 
-            # 카드 절대 좌표 찾기
-            card_abs = await page.evaluate("""
+            result = await page.evaluate("""
                 () => {
-                    const items = [];
-                    document.querySelectorAll('*').forEach(el => {
+                    const all = document.querySelectorAll('a, button, span, div, li');
+                    for (const el of all) {
                         const text = el.innerText?.trim();
-                        if (text && text.length > 5 && text.length < 150 &&
-                            (text.includes('즉시할인') || text.includes('결제시')) &&
-                            text.includes('%') &&
-                            !text.includes('브랜드') && !text.includes('쿠폰') &&
-                            !text.includes('적립금') && !text.includes('다운로드')) {
+                        if (text === '카드/결제혜택') {
                             const rect = el.getBoundingClientRect();
-                            const absY = rect.top + window.scrollY;
-                            if (rect.width > 80 && rect.height > 50 && absY > 0) {
-                                items.push({
-                                    x: Math.round(rect.left),
-                                    absY: Math.round(absY),
-                                    width: Math.round(rect.width),
-                                    height: Math.round(rect.height),
-                                    text: text.slice(0, 60)
-                                });
+                            // 뷰포트 안에 있고 클릭 가능한 요소
+                            if (rect.width > 0 && rect.top > 30 && rect.top < 800) {
+                                el.click();
+                                return { x: Math.round(rect.left + rect.width/2), y: Math.round(rect.top), text };
                             }
                         }
-                    });
-                    if (items.length === 0) return null;
-                    const minAbsY = Math.min(...items.map(i => i.absY));
-                    const maxAbsY = Math.max(...items.map(i => i.absY + i.height));
-                    const minX = Math.min(...items.map(i => i.x));
-                    const maxX = Math.max(...items.map(i => i.x + i.width));
-                    return {
-                        x: minX,
-                        absY: minAbsY,
-                        width: maxX - minX,
-                        height: maxAbsY - minAbsY,
-                        count: items.length
-                    };
+                    }
+                    return null;
                 }
             """)
-            print(f"  scroll_y={scroll_y} 카드 절대좌표: {card_abs}")
+            if result:
+                print(f"  카드/결제혜택 탭 클릭 성공: y={result['y']} (scroll={scroll_y})")
+                tab_found = True
+                await asyncio.sleep(4)
+                break
 
-            if card_abs and card_abs['height'] > 50:
-                # 카드 영역이 화면 중앙에 오도록 스크롤 조정
-                target_scroll = max(0, card_abs['absY'] - 200)
-                await page.evaluate(f"window.scrollTo(0, {target_scroll})")
-                await asyncio.sleep(1)
+        if not tab_found:
+            print("  탭 못 찾음 - fallback")
 
-                # 스크롤 후 뷰포트 기준 좌표 재계산
-                new_box = await page.evaluate(f"""
-                    () => {{
-                        const items = [];
-                        document.querySelectorAll('*').forEach(el => {{
-                            const text = el.innerText?.trim();
-                            if (text && text.length > 5 && text.length < 150 &&
-                                (text.includes('즉시할인') || text.includes('결제시')) &&
-                                text.includes('%') &&
-                                !text.includes('브랜드') && !text.includes('쿠폰') &&
-                                !text.includes('적립금') && !text.includes('다운로드')) {{
-                                const rect = el.getBoundingClientRect();
-                                if (rect.width > 80 && rect.height > 50 && rect.top > 0 && rect.top < 844) {{
-                                    items.push({{
-                                        x: Math.round(rect.left),
-                                        y: Math.round(rect.top),
-                                        width: Math.round(rect.width),
-                                        height: Math.round(rect.height)
-                                    }});
-                                }}
-                            }}
-                        }});
-                        if (items.length === 0) return null;
-                        const minY = Math.min(...items.map(i => i.y));
-                        const maxY = Math.max(...items.map(i => i.y + i.height));
-                        const minX = Math.min(...items.map(i => i.x));
-                        const maxX = Math.max(...items.map(i => i.x + i.width));
-                        return {{ x: minX, y: minY, width: maxX - minX, height: maxY - minY }};
-                    }}
-                """)
-                print(f"  조정 후 박스: {new_box}")
+        # 클릭 후 카드 영역 절대좌표 찾기
+        card_abs = await page.evaluate("""
+            () => {
+                // 카드/결제혜택 섹션의 카드 아이템만 찾기
+                // '오늘 종료', '1일 남음' 등 딱지가 붙은 카드 컨테이너
+                const candidates = [];
+                document.querySelectorAll('*').forEach(el => {
+                    const text = el.innerText?.trim() || '';
+                    if (text.includes('즉시할인') && text.includes('%')
+                        && text.length < 100
+                        && !text.includes('쿠폰') && !text.includes('적립금')
+                        && !text.includes('브랜드') && !text.includes('다운로드')) {
+                        const rect = el.getBoundingClientRect();
+                        const absY = rect.top + window.scrollY;
+                        if (rect.width > 100 && rect.height > 80 && absY > 500) {
+                            candidates.push({
+                                absY: Math.round(absY),
+                                absYEnd: Math.round(absY + rect.height),
+                                x: Math.round(rect.left),
+                                width: Math.round(rect.width),
+                                height: Math.round(rect.height)
+                            });
+                        }
+                    }
+                });
+                if (candidates.length === 0) return null;
+                const minAbsY = Math.min(...candidates.map(c => c.absY));
+                const maxAbsY = Math.max(...candidates.map(c => c.absYEnd));
+                const minX = Math.min(...candidates.map(c => c.x));
+                const maxX = Math.max(...candidates.map(c => c.x + c.width));
+                return { absY: minAbsY, absYEnd: maxAbsY, x: minX, width: maxX - minX, count: candidates.length };
+            }
+        """)
+        print(f"  카드 절대좌표: {card_abs}")
 
-                if new_box and new_box['height'] > 50:
-                    clip_x = max(0, new_box['x'] - 10)
-                    clip_y = max(0, new_box['y'] - 50)
-                    clip_w = min(390 - clip_x, new_box['width'] + 20)
-                    clip_h = new_box['height'] + 80
+        captured = False
+        if card_abs and card_abs['absYEnd'] - card_abs['absY'] > 100:
+            # 카드 영역 시작점으로 스크롤
+            await page.evaluate(f"window.scrollTo(0, {max(0, card_abs['absY'] - 100)})")
+            await asyncio.sleep(2)
 
-                    await page.screenshot(
-                        path=path,
-                        clip={"x": clip_x, "y": clip_y, "width": clip_w, "height": clip_h}
-                    )
-                    print(f"  캡처 성공 ({clip_w}x{clip_h})")
-                    captured = True
-                    break
+            # full_page=True로 전체 카드 영역 캡처
+            temp_path = os.path.join(SCREENSHOT_DIR, f"cj_full_{today}.png")
+            await page.screenshot(path=temp_path, full_page=True)
+
+            # PIL로 카드 영역만 크롭
+            try:
+                from PIL import Image
+                img = Image.open(temp_path)
+                # 카드 시작~끝 영역 크롭 (2x scale 고려)
+                scale = img.width / 390
+                crop_top = int(max(0, card_abs['absY'] - 80) * scale)
+                crop_bottom = int((card_abs['absYEnd'] + 50) * scale)
+                crop_left = int(max(0, card_abs['x'] - 10) * scale)
+                crop_right = int(min(img.width, (card_abs['x'] + card_abs['width'] + 10) * scale))
+                cropped = img.crop((crop_left, crop_top, crop_right, crop_bottom))
+                cropped.save(path)
+                print(f"  PIL 크롭 성공: {cropped.size}")
+                captured = True
+                os.remove(temp_path)
+            except Exception as e:
+                print(f"  PIL 실패: {e} - full 스크린샷 사용")
+                import shutil
+                shutil.move(temp_path, path)
+                captured = True
 
         if not captured:
             await page.evaluate("window.scrollTo(0, 1200)")
