@@ -34,11 +34,10 @@ async def capture_cj(browser):
         today = datetime.now().strftime("%Y%m%d")
         path = os.path.join(SCREENSHOT_DIR, f"cj_{today}.png")
 
-        # 1200px 스크롤 후 카드/결제혜택 탭 찾기
+        # 1200px 스크롤 후 카드/결제혜택 탭 클릭
         await page.evaluate("window.scrollTo(0, 1200)")
         await asyncio.sleep(2)
 
-        # 텍스트가 짧은 카드/결제혜택 탭만 선택 (정확한 탭 버튼)
         tab_clicked = await page.evaluate("""
             () => {
                 const all = document.querySelectorAll('a, button, span, div, li');
@@ -58,53 +57,62 @@ async def capture_cj(browser):
         print(f"  카드/결제혜택 탭 클릭: {tab_clicked}")
         await asyncio.sleep(3)
 
-        # 클릭 후 카드 목록 영역 찾아서 스크린샷
-        card_section = await page.evaluate("""
-            () => {
-                // 카드 항목들 찾기 (즉시할인 or %가 포함된 카드 항목)
-                const items = [];
-                document.querySelectorAll('*').forEach(el => {
-                    const text = el.innerText?.trim();
-                    if (text && text.length < 100 &&
-                        (text.includes('즉시할인') || text.includes('결제시')) &&
-                        text.includes('%')) {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 100 && rect.height > 50 && rect.top > 0 && rect.top < 844) {
-                            items.push({
-                                x: Math.round(rect.left),
-                                y: Math.round(rect.top),
-                                width: Math.round(rect.width),
-                                height: Math.round(rect.height),
-                                text: text.slice(0, 60)
-                            });
-                        }
-                    }
-                });
-                if (items.length === 0) return null;
-                const minY = Math.min(...items.map(i => i.y));
-                const maxY = Math.max(...items.map(i => i.y + i.height));
-                const minX = Math.min(...items.map(i => i.x));
-                const maxX = Math.max(...items.map(i => i.x + i.width));
-                return { x: minX, y: minY, width: maxX - minX, height: maxY - minY, count: items.length };
-            }
-        """)
-        print(f"  카드 섹션: {card_section}")
-
+        # 탭 클릭 후 스크롤하면서 카드 영역 찾기
         captured = False
-        if card_section and card_section['height'] > 50:
-            clip_x = max(0, card_section['x'] - 10)
-            clip_y = max(0, card_section['y'] - 50)
-            clip_w = min(390 - clip_x, card_section['width'] + 20)
-            clip_h = min(844 - clip_y, card_section['height'] + 60)
+        for scroll_y in [1200, 1400, 1600, 1800, 2000, 2200, 2500]:
+            await page.evaluate(f"window.scrollTo(0, {scroll_y})")
+            await asyncio.sleep(1)
 
-            await page.screenshot(
-                path=path,
-                clip={"x": clip_x, "y": clip_y, "width": clip_w, "height": clip_h}
-            )
-            print(f"  카드 섹션 캡처 성공 ({clip_w}x{clip_h})")
-            captured = True
+            card_section = await page.evaluate("""
+                () => {
+                    const items = [];
+                    document.querySelectorAll('*').forEach(el => {
+                        const text = el.innerText?.trim();
+                        if (text && text.length > 5 && text.length < 150 &&
+                            (text.includes('즉시할인') || text.includes('결제시')) &&
+                            text.includes('%') &&
+                            !text.includes('브랜드') && !text.includes('쿠폰') &&
+                            !text.includes('적립금') && !text.includes('다운로드')) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 80 && rect.height > 50 &&
+                                rect.top > 0 && rect.top < 844) {
+                                items.push({
+                                    x: Math.round(rect.left),
+                                    y: Math.round(rect.top),
+                                    width: Math.round(rect.width),
+                                    height: Math.round(rect.height),
+                                    text: text.slice(0, 60)
+                                });
+                            }
+                        }
+                    });
+                    if (items.length === 0) return null;
+                    const minY = Math.min(...items.map(i => i.y));
+                    const maxY = Math.max(...items.map(i => i.y + i.height));
+                    const minX = Math.min(...items.map(i => i.x));
+                    const maxX = Math.max(...items.map(i => i.x + i.width));
+                    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY, count: items.length };
+                }
+            """)
+            print(f"  scroll_y={scroll_y} 카드 섹션: {card_section}")
+
+            if card_section and card_section['height'] > 50:
+                clip_x = max(0, card_section['x'] - 10)
+                clip_y = max(0, card_section['y'] - 50)
+                clip_w = min(390 - clip_x, card_section['width'] + 20)
+                clip_h = min(844 - clip_y, card_section['height'] + 60)
+
+                await page.screenshot(
+                    path=path,
+                    clip={"x": clip_x, "y": clip_y, "width": clip_w, "height": clip_h}
+                )
+                print(f"  캡처 성공 ({clip_w}x{clip_h})")
+                captured = True
+                break
 
         if not captured:
+            await page.evaluate("window.scrollTo(0, 1200)")
+            await asyncio.sleep(1)
             await page.screenshot(path=path)
             print("  전체 페이지 캡처 (fallback)")
 
@@ -125,7 +133,10 @@ async def capture_hmall(browser):
     try:
         print("[Hmall] 접속 중...")
         try:
-            await page.goto("https://www.hmall.com/md/dpl/index", wait_until="domcontentloaded", timeout=40000)
+            await page.goto(
+                f"https://www.hmall.com/md/dpl/index?_={datetime.now().strftime('%Y%m%d%H%M%S')}",
+                wait_until="domcontentloaded", timeout=40000
+            )
         except Exception as e:
             print(f"  goto 예외 무시: {e}")
         await asyncio.sleep(5)
