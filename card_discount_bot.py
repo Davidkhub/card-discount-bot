@@ -19,6 +19,13 @@ MOB_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605
 
 
 async def capture_cj(browser):
+        # Pillow 자동 설치
+    try:
+        from PIL import Image
+    except ImportError:
+        import subprocess
+        subprocess.run(["pip", "install", "Pillow", "--break-system-packages", "-q"])
+    
     page = await browser.new_page(
         viewport={"width": 390, "height": 844},
         user_agent=MOB_UA,
