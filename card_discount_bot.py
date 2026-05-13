@@ -19,7 +19,6 @@ MOB_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605
 
 VIEWPORT_H = 844  # 뷰포트 높이
 
-
 async def capture_cj(browser):
     try:
         from PIL import Image
@@ -27,6 +26,10 @@ async def capture_cj(browser):
         import subprocess
         subprocess.run(["pip", "install", "Pillow", "--break-system-packages", "-q"])
     from PIL import Image
+
+    CROP_TOP    = 50   # 상단 고정 네비게이션 바
+    CROP_BOTTOM = 60   # 하단 고정 탭 바
+    EFFECTIVE_H = VIEWPORT_H - CROP_TOP - CROP_BOTTOM  # 실제 유효 높이
 
     page = await browser.new_page(
         viewport={"width": 390, "height": VIEWPORT_H},
@@ -54,40 +57,47 @@ async def capture_cj(browser):
             total_height = await page.evaluate("() => document.body.scrollHeight")
         await asyncio.sleep(2)
 
-        bottom_scroll = await page.evaluate("() => document.body.scrollHeight - window.innerHeight")
         doc_height = await page.evaluate("() => document.body.scrollHeight")
+        bottom_scroll = doc_height - VIEWPORT_H
         print(f"  맨 아래 scrollY: {bottom_scroll}, 문서 총 높이: {doc_height}")
 
-        # 캡처 범위: 맨 아래에서 750px 올라간 지점 ~ 거기서 위로 2800px
-        cap_bottom = doc_height - 750          # 캡처 하단 절대 y
-        cap_top    = max(0, cap_bottom - 2800) # 캡처 상단 절대 y
-        cap_height = cap_bottom - cap_top      # 실제 캡처 높이 (최대 2800)
+        # 캡처 범위: 맨 아래에서 750px 올라간 지점부터 위로 2800px
+        cap_bottom = doc_height - 750
+        cap_top    = max(0, cap_bottom - 2800)
+        cap_height = cap_bottom - cap_top
         print(f"  캡처 범위: y={cap_top} ~ y={cap_bottom} ({cap_height}px)")
 
-        # 뷰포트 단위로 스크롤하며 캡처 후 합치기
+        # EFFECTIVE_H 단위로 스크롤하며 캡처
         cropped_imgs = []
         scroll_y = cap_top
         while scroll_y < cap_bottom:
             await page.evaluate(f"window.scrollTo(0, {scroll_y})")
             await asyncio.sleep(0.6)
 
-            # 이번 뷰포트에서 실제로 캡처할 절대 y 범위
-            view_top    = scroll_y
-            view_bottom = scroll_y + VIEWPORT_H
-            crop_top    = max(cap_top, view_top) - view_top          # 뷰포트 내 오프셋
-            crop_bottom = min(cap_bottom, view_bottom) - view_top    # 뷰포트 내 오프셋
+            # 이번 뷰포트에서 캡처할 절대 y 범위
+            abs_top    = scroll_y + CROP_TOP          # 유효 영역 절대 상단
+            abs_bottom = scroll_y + VIEWPORT_H - CROP_BOTTOM  # 유효 영역 절대 하단
+            # cap 범위로 클램프
+            actual_top    = max(cap_top, abs_top)
+            actual_bottom = min(cap_bottom, abs_bottom)
+            if actual_bottom <= actual_top:
+                scroll_y += EFFECTIVE_H
+                continue
 
             tmp_path = os.path.join(SCREENSHOT_DIR, f"cj_tmp_{scroll_y}_{today}.png")
             await page.screenshot(path=tmp_path)
 
             img = Image.open(tmp_path)
-            cropped = img.crop((0, crop_top, img.width, crop_bottom))
+            # 뷰포트 내 crop 좌표
+            crop_top_px    = actual_top - scroll_y
+            crop_bottom_px = actual_bottom - scroll_y
+            cropped = img.crop((0, crop_top_px, img.width, crop_bottom_px))
             cropped_imgs.append(cropped)
             os.remove(tmp_path)
 
-            scroll_y += VIEWPORT_H
+            scroll_y += EFFECTIVE_H
 
-        print(f"  {len(cropped_imgs)}구간 캡처 완료")
+        print(f"  {len(cropped_imgs)}구간 캡처 완료: {[img.size for img in cropped_imgs]}")
 
         # 세로 합치기
         total_w = cropped_imgs[0].width
@@ -109,6 +119,13 @@ async def capture_cj(browser):
         await page.close()
 
 async def capture_hmall(browser):
+    try:
+        from PIL import Image
+    except ImportError:
+        import subprocess
+        subprocess.run(["pip", "install", "Pillow", "--break-system-packages", "-q"])
+    from PIL import Image
+
     page = await browser.new_page(
         viewport={"width": 390, "height": 844},
         user_agent=MOB_UA,
@@ -179,7 +196,7 @@ async def capture_hmall(browser):
         first = card_elements[0]
         print(f"  첫 번째 카드 클릭: '{first['text']}'")
         await page.mouse.click(first['x'], first['y'])
-        await asyncio.sleep(3)
+        await asyncio.sleep(4)
         print(f"  상세 페이지 URL: {page.url}")
 
         tabs = await page.evaluate("""
@@ -206,15 +223,68 @@ async def capture_hmall(browser):
         if len(tabs) == 0:
             print("  탭 없음 - 현재 페이지 단일 카드로 스크린샷")
             path = os.path.join(SCREENSHOT_DIR, f"hmall_0_{today}.png")
-            # full_page=False: 뷰포트만 캡처 (403 방지)
+            await page.evaluate("window.scrollTo(0, 0)")
+            await asyncio.sleep(0.5)
             await page.screenshot(path=path, full_page=False)
             card_name = first['text'].replace('즉시할인', '').strip()
             results.append({"card_name": card_name, "path": path})
             return results
 
+        async def screenshot_full_scroll(filename_prefix, tab_index):
+            """뷰포트 스크롤 캡처 후 PIL로 합치기"""
+            await page.evaluate("window.scrollTo(0, 0)")
+            await asyncio.sleep(0.5)
+
+            scroll_height = await page.evaluate("() => document.body.scrollHeight")
+            viewport_h = 844
+            shot_paths = []
+            sy = 0
+            shot_idx = 0
+            while sy < scroll_height:
+                await page.evaluate(f"window.scrollTo(0, {sy})")
+                await asyncio.sleep(0.4)
+                tmp = os.path.join(SCREENSHOT_DIR, f"{filename_prefix}_{tab_index}_s{shot_idx}_{today}.png")
+                await page.screenshot(path=tmp, full_page=False)
+                shot_paths.append((sy, tmp))
+                sy += viewport_h
+                shot_idx += 1
+
+            if len(shot_paths) == 1:
+                # 단일 뷰포트면 그대로
+                final_path = os.path.join(SCREENSHOT_DIR, f"hmall_{tab_index}_{today}.png")
+                os.rename(shot_paths[0][1], final_path)
+                return final_path
+
+            # 합치기
+            pieces = []
+            for sy_val, tmp_path in shot_paths:
+                img = Image.open(tmp_path)
+                # 마지막 조각은 실제 남은 높이만큼만 crop
+                remaining = scroll_height - sy_val
+                if remaining < viewport_h:
+                    img = img.crop((0, 0, img.width, remaining))
+                pieces.append((sy_val, img))
+
+            total_w = pieces[0][1].width
+            combined = Image.new("RGB", (total_w, scroll_height))
+            for sy_val, img in pieces:
+                combined.paste(img, (0, sy_val))
+
+            final_path = os.path.join(SCREENSHOT_DIR, f"hmall_{tab_index}_{today}.png")
+            combined.save(final_path)
+            for _, img in pieces:
+                img.close()
+            for _, tmp_path in shot_paths:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+            print(f"    합치기 완료: {combined.size}")
+            return final_path
+
         for i, tab in enumerate(tabs):
             print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
             try:
+                # JS로 탭 클릭 (스크롤 위치 유지)
                 await page.evaluate(f"""
                     () => {{
                         const tabs = [...document.querySelectorAll('a, button, li, div[role="tab"]')]
@@ -226,59 +296,22 @@ async def capture_hmall(browser):
                         if (tabs[{i}]) tabs[{i}].click();
                     }}
                 """)
-                await asyncio.sleep(4)
+                # 콘텐츠 교체 대기: DOM 변화 또는 타임아웃
+                await asyncio.sleep(3)
 
-                # 스크롤하며 뷰포트 캡처 (full_page=True 대신)
-                scroll_height = await page.evaluate("() => document.body.scrollHeight")
-                viewport_h = 844
-                all_shots = []
-                sy = 0
-                while sy < scroll_height:
-                    await page.evaluate(f"window.scrollTo(0, {sy})")
-                    await asyncio.sleep(0.5)
-                    tmp = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_tmp_{sy}_{today}.png")
-                    await page.screenshot(path=tmp, full_page=False)  # 뷰포트만
-                    all_shots.append((sy, tmp))
-                    sy += viewport_h
-
-                # 합치기
-                try:
-                    from PIL import Image
-                    imgs = []
-                    for (sy_val, tmp_path) in all_shots:
-                        imgs.append((sy_val, Image.open(tmp_path)))
-
-                    total_w = imgs[0][1].width
-                    total_h = scroll_height
-                    combined = Image.new("RGB", (total_w, total_h))
-                    for sy_val, img in imgs:
-                        combined.paste(img, (0, sy_val))
-
-                    path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
-                    combined.save(path)
-                    for _, tmp_path in all_shots:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-                    for _, img in imgs:
-                        img.close()
-                    print(f"    합치기 완료: {combined.size}")
-                except Exception as e2:
-                    print(f"    합치기 실패, 첫 뷰포트만 사용: {e2}")
-                    path = all_shots[0][1]
-                    for _, tmp_path in all_shots[1:]:
-                        if os.path.exists(tmp_path):
-                            os.remove(tmp_path)
-
-                page_text = await page.evaluate("() => document.body.innerText.slice(0, 100)")
-                if "403" in page_text or "ERROR" in page_text:
+                # 403/에러 텍스트 체크 (스크린샷 전에)
+                page_text = await page.evaluate("() => document.body.innerText.slice(0, 200)")
+                if "403" in page_text or "Forbidden" in page_text:
                     print(f"    403 에러 감지 - 건너뜀")
-                    if os.path.exists(path):
-                        os.remove(path)
                     continue
 
-                results.append({"card_name": tab['text'], "path": path})
+                final_path = await screenshot_full_scroll("hmall_tmp", i)
+                results.append({"card_name": tab['text'], "path": final_path})
+                print(f"    저장: {final_path}")
+
             except Exception as e:
                 print(f"    오류: {e}")
+                import traceback; traceback.print_exc()
 
         return results
     except Exception as e:
@@ -286,8 +319,6 @@ async def capture_hmall(browser):
         return []
     finally:
         await page.close()
-
-
 
 async def collect_lotte(browser):
     page = await browser.new_page(
