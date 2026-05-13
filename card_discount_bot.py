@@ -128,13 +128,56 @@ async def capture_hmall(browser):
         subprocess.run(["pip", "install", "Pillow", "--break-system-packages", "-q"])
     from PIL import Image
 
-    page = await browser.new_page(
+    # stealth 설정을 위한 컨텍스트 생성
+    context = await browser.new_context(
         viewport={"width": 390, "height": 844},
         user_agent=MOB_UA,
+        locale="ko-KR",
+        timezone_id="Asia/Seoul",
+        extra_http_headers={
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Encoding": "gzip, deflate, br",
+            "sec-ch-ua": '"Chromium";v="124", "Not-A.Brand";v="99"',
+            "sec-ch-ua-mobile": "?1",
+            "sec-ch-ua-platform": '"Android"',
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-User": "?1",
+            "Upgrade-Insecure-Requests": "1",
+        }
     )
+
+    # navigator.webdriver 숨기기
+    await context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+        Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko'] });
+        window.chrome = { runtime: {} };
+    """)
+
+    page = await context.new_page()
     results = []
     try:
         print("[Hmall] 접속 중...")
+        # 1단계: 메인 먼저 방문 (세션/쿠키 확보)
+        try:
+            await page.goto(
+                "https://www.hmall.com/",
+                wait_until="domcontentloaded", timeout=40000
+            )
+        except Exception as e:
+            print(f"  메인 goto 예외 무시: {e}")
+        await asyncio.sleep(3)
+
+        # 사람처럼 약간 스크롤
+        await page.evaluate("window.scrollTo(0, 300)")
+        await asyncio.sleep(1)
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(1)
+
+        # 2단계: 혜택 탭이 있는 페이지로 이동
         try:
             await page.goto(
                 f"https://www.hmall.com/md/dpl/index?_={datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -143,9 +186,11 @@ async def capture_hmall(browser):
         except Exception as e:
             print(f"  goto 예외 무시: {e}")
         await asyncio.sleep(5)
+
         os.makedirs(SCREENSHOT_DIR, exist_ok=True)
         today = datetime.now().strftime("%Y%m%d")
 
+        # 팝업 제거
         try:
             el = await page.query_selector("[aria-label='메인 배너 팝업'] button")
             if el:
@@ -156,6 +201,7 @@ async def capture_hmall(browser):
         await page.evaluate("() => { document.querySelectorAll('[role=\"dialog\"], #modal-root > *').forEach(el => el.remove()); }")
         await asyncio.sleep(1)
 
+        # 혜택 탭 클릭
         try:
             el = await page.query_selector("[data-maindispseq='7']")
             if el:
@@ -168,6 +214,7 @@ async def capture_hmall(browser):
         await page.evaluate("window.scrollTo(0, 900)")
         await asyncio.sleep(2)
 
+        # 카드 요소 찾기
         card_elements = await page.evaluate("""
             () => {
                 const results = [];
@@ -197,10 +244,53 @@ async def capture_hmall(browser):
 
         first = card_elements[0]
         print(f"  첫 번째 카드 클릭: '{first['text']}'")
-        await page.mouse.click(first['x'], first['y'])
+
+        # 3단계: 상세 페이지 URL을 href에서 직접 추출해서 goto로 이동
+        detail_url = await page.evaluate("""
+            () => {
+                let target = null;
+                document.querySelectorAll('*').forEach(el => {
+                    if (el.innerText?.trim() === '즉시할인') {
+                        let parent = el;
+                        for (let i = 0; i < 10; i++) {
+                            parent = parent.parentElement;
+                            if (!parent) break;
+                            if (parent.tagName === 'A' && parent.href) {
+                                target = parent.href;
+                                break;
+                            }
+                            const a = parent.querySelector('a[href]');
+                            if (a) { target = a.href; break; }
+                        }
+                    }
+                });
+                return target;
+            }
+        """)
+
+        if detail_url:
+            print(f"  상세 URL 추출: {detail_url}")
+            # Referer 헤더를 메인으로 설정하고 이동
+            await page.set_extra_http_headers({"Referer": "https://www.hmall.com/md/dpl/index"})
+            try:
+                await page.goto(detail_url, wait_until="domcontentloaded", timeout=40000)
+            except Exception as e:
+                print(f"  상세 goto 예외 무시: {e}")
+        else:
+            print("  href 없음 - 마우스 클릭으로 이동")
+            await page.mouse.click(first['x'], first['y'])
+
         await asyncio.sleep(4)
         print(f"  상세 페이지 URL: {page.url}")
 
+        # 403 체크
+        page_text = await page.evaluate("() => document.body.innerText.slice(0, 100)")
+        print(f"  [DEBUG] 상세 body: {repr(page_text[:100])}")
+        if "403" in page_text:
+            print("  상세 페이지 403 - 실패")
+            return []
+
+        # 탭 목록 수집
         tabs = await page.evaluate("""
             () => {
                 const results = [];
@@ -221,16 +311,6 @@ async def capture_hmall(browser):
             }
         """)
         print(f"  탭 {len(tabs)}개: {[t['text'] for t in tabs]}")
-
-        if len(tabs) == 0:
-            print("  탭 없음 - 현재 페이지 단일 카드로 스크린샷")
-            path = os.path.join(SCREENSHOT_DIR, f"hmall_0_{today}.png")
-            await page.evaluate("window.scrollTo(0, 0)")
-            await asyncio.sleep(0.5)
-            await page.screenshot(path=path, full_page=False)
-            card_name = first['text'].replace('즉시할인', '').strip()
-            results.append({"card_name": card_name, "path": path})
-            return results
 
         async def screenshot_full_scroll(tab_index):
             await page.evaluate("window.scrollTo(0, 0)")
@@ -277,6 +357,15 @@ async def capture_hmall(browser):
             print(f"    합치기 완료: {combined.size}")
             return final_path
 
+        if len(tabs) == 0:
+            print("  탭 없음 - 현재 페이지 단일 캡처")
+            path = os.path.join(SCREENSHOT_DIR, f"hmall_0_{today}.png")
+            await page.evaluate("window.scrollTo(0, 0)")
+            await asyncio.sleep(0.5)
+            await page.screenshot(path=path, full_page=False)
+            results.append({"card_name": first['text'].replace('즉시할인', '').strip(), "path": path})
+            return results
+
         for i, tab in enumerate(tabs):
             print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
             try:
@@ -293,11 +382,11 @@ async def capture_hmall(browser):
                 """)
                 await asyncio.sleep(3)
 
-                # ── 디버그: 실제 body 텍스트 200자 출력 ──
-                page_text = await page.evaluate("() => document.body.innerText.slice(0, 200)")
-                print(f"    [DEBUG] body 앞 200자: {repr(page_text)}")
+                page_text = await page.evaluate("() => document.body.innerText.slice(0, 100)")
+                if "403" in page_text:
+                    print(f"    403 감지 - 건너뜀")
+                    continue
 
-                # 403 체크 제거 → 일단 무조건 캡처
                 final_path = await screenshot_full_scroll(i)
                 results.append({"card_name": tab['text'], "path": final_path})
                 print(f"    저장: {final_path}")
@@ -307,11 +396,14 @@ async def capture_hmall(browser):
                 import traceback; traceback.print_exc()
 
         return results
+
     except Exception as e:
         print(f"  전체 오류: {e}")
+        import traceback; traceback.print_exc()
         return []
     finally:
         await page.close()
+        await context.close()
 
 
 
