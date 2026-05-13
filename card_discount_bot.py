@@ -154,7 +154,7 @@ async def capture_hmall(browser):
         os.makedirs(SCREENSHOT_DIR, exist_ok=True)
         today = datetime.now().strftime("%Y%m%d")
 
-        # 1단계: 메인 방문으로 쿠키 확보
+        # 메인 방문으로 쿠키 확보
         try:
             await page.goto("https://www.hmall.com/", wait_until="domcontentloaded", timeout=40000)
         except Exception as e:
@@ -163,7 +163,7 @@ async def capture_hmall(browser):
         await page.evaluate("window.scrollTo(0, 500)")
         await asyncio.sleep(1)
 
-        # 2단계: 혜택 탭 페이지
+        # 혜택 탭 페이지
         try:
             await page.goto(
                 f"https://www.hmall.com/md/dpl/index?_={datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -197,17 +197,7 @@ async def capture_hmall(browser):
         await page.evaluate("window.scrollTo(0, 900)")
         await asyncio.sleep(2)
 
-        # 즉시할인 카드 클릭 → 네트워크 요청에서 상세 URL 캡처
-        detail_url = None
-
-        async def handle_request(request):
-            nonlocal detail_url
-            if "crdDmndDcPrmo" in request.url or "prmoNo" in request.url:
-                detail_url = request.url
-                print(f"  [네트워크] 상세 URL 감지: {request.url}")
-
-        page.on("request", handle_request)
-
+        # 카드 요소 찾기
         card_elements = await page.evaluate("""
             () => {
                 const results = [];
@@ -237,50 +227,21 @@ async def capture_hmall(browser):
 
         first = card_elements[0]
         print(f"  첫 번째 카드 클릭: '{first['text']}'")
+
+        # 같은 page에서 클릭으로 자연스럽게 상세 페이지 이동
         await page.mouse.click(first['x'], first['y'])
-        await asyncio.sleep(4)
-        print(f"  현재 URL: {page.url}")
+        await asyncio.sleep(5)
+        print(f"  상세 페이지 URL: {page.url}")
 
-        page.remove_listener("request", handle_request)
-
-        # 현재 URL이 상세 페이지인지 확인
-        current_url = page.url
-        if "crdDmndDcPrmo" in current_url or "prmoNo" in current_url:
-            detail_url = current_url
-
-        print(f"  상세 URL: {detail_url}")
-
-        # 상세 URL을 못 잡았으면 JS로 history 확인
-        if not detail_url:
-            js_url = await page.evaluate("() => location.href")
-            print(f"  JS location.href: {js_url}")
-            if "crdDmndDcPrmo" in js_url or "prmoNo" in js_url:
-                detail_url = js_url
-
-        if not detail_url:
-            print("  상세 URL 확보 실패")
-            return []
-
-        # 3단계: 상세 페이지를 새 탭에서 직접 goto (Referer 포함)
-        detail_page = await context.new_page()
-        await detail_page.set_extra_http_headers({
-            "Referer": "https://www.hmall.com/md/dpl/index",
-        })
-        try:
-            await detail_page.goto(detail_url, wait_until="domcontentloaded", timeout=40000)
-        except Exception as e:
-            print(f"  상세 페이지 goto 예외 무시: {e}")
-        await asyncio.sleep(4)
-
-        check = await detail_page.evaluate("() => document.body.innerText.slice(0, 150)")
-        print(f"  [DEBUG] 상세 body: {repr(check)}")
-        if "403 ERROR" in check:
+        # 403 체크
+        body_start = await page.evaluate("() => document.body.innerText.slice(0, 50)")
+        print(f"  [DEBUG] 상세 body: {repr(body_start)}")
+        if "403 ERROR" in body_start:
             print("  상세 페이지 403 - 실패")
-            await detail_page.close()
             return []
 
         # 탭 수집
-        tabs = await detail_page.evaluate("""
+        tabs = await page.evaluate("""
             () => {
                 const results = [];
                 const seen = new Set();
@@ -303,19 +264,19 @@ async def capture_hmall(browser):
         """)
         print(f"  탭 {len(tabs)}개: {[t['text'] for t in tabs]}")
 
-        async def screenshot_full_scroll(pg, tab_index):
-            await pg.evaluate("window.scrollTo(0, 0)")
+        async def screenshot_full_scroll(tab_index):
+            await page.evaluate("window.scrollTo(0, 0)")
             await asyncio.sleep(0.5)
-            scroll_height = await pg.evaluate("() => document.body.scrollHeight")
+            scroll_height = await page.evaluate("() => document.body.scrollHeight")
             viewport_h = 844
             pieces = []
             sy = 0
             idx = 0
             while sy < scroll_height:
-                await pg.evaluate(f"window.scrollTo(0, {sy})")
+                await page.evaluate(f"window.scrollTo(0, {sy})")
                 await asyncio.sleep(0.4)
                 tmp = os.path.join(SCREENSHOT_DIR, f"hmall_tmp_{tab_index}_{idx}_{today}.png")
-                await pg.screenshot(path=tmp, full_page=False)
+                await page.screenshot(path=tmp, full_page=False)
                 img = Image.open(tmp)
                 remaining = scroll_height - sy
                 if remaining < viewport_h:
@@ -345,15 +306,14 @@ async def capture_hmall(browser):
 
         if len(tabs) == 0:
             print("  탭 없음 - 현재 페이지 단일 캡처")
-            path = await screenshot_full_scroll(detail_page, 0)
+            path = await screenshot_full_scroll(0)
             results.append({"card_name": first['text'].replace('즉시할인', '').strip(), "path": path})
-            await detail_page.close()
             return results
 
         for i, tab in enumerate(tabs):
             print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
             try:
-                await detail_page.evaluate(f"""
+                await page.evaluate(f"""
                     () => {{
                         const tabs = [...document.querySelectorAll('a, button, li, div[role="tab"]')]
                             .filter(el => {{
@@ -366,13 +326,12 @@ async def capture_hmall(browser):
                 """)
                 await asyncio.sleep(3)
 
-                # 403 체크: "403 ERROR" 문자열 전체로만 판단
-                body_start = await detail_page.evaluate("() => document.body.innerText.slice(0, 50)")
+                body_start = await page.evaluate("() => document.body.innerText.slice(0, 50)")
                 if "403 ERROR" in body_start:
                     print(f"    403 감지 - 건너뜀")
                     continue
 
-                final_path = await screenshot_full_scroll(detail_page, i)
+                final_path = await screenshot_full_scroll(i)
                 results.append({"card_name": tab['text'], "path": final_path})
                 print(f"    저장: {final_path}")
 
@@ -380,7 +339,6 @@ async def capture_hmall(browser):
                 print(f"    오류: {e}")
                 import traceback; traceback.print_exc()
 
-        await detail_page.close()
         return results
 
     except Exception as e:
