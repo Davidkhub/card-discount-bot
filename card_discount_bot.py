@@ -326,6 +326,10 @@ async def capture_hmall(browser):
                 """)
                 await asyncio.sleep(3)
 
+                # 디버그: 탭 클릭 후 body 확인
+                body_start = await page.evaluate("() => document.body.innerText.slice(0, 100)")
+                print(f"    [DEBUG] 탭 클릭 후 body: {repr(body_start)}")
+
                 body_start = await page.evaluate("() => document.body.innerText.slice(0, 50)")
                 if "403 ERROR" in body_start:
                     print(f"    403 감지 - 건너뜀")
