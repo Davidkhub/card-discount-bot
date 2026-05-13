@@ -17,9 +17,14 @@ SCREENSHOT_DIR = "screenshots"
 PC_UA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 MOB_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
-VIEWPORT_H = 844  # 뷰포트 높이
+VIEWPORT_H  = 844
+CROP_TOP    = 50   # CJ 상단 고정 네비게이션 바
+CROP_BOTTOM = 60   # CJ 하단 고정 탭 바
 
 
+# ──────────────────────────────────────────────
+# CJ온스타일
+# ──────────────────────────────────────────────
 async def capture_cj(browser):
     try:
         from PIL import Image
@@ -28,9 +33,7 @@ async def capture_cj(browser):
         subprocess.run(["pip", "install", "Pillow", "--break-system-packages", "-q"])
     from PIL import Image
 
-    CROP_TOP    = 50   # 상단 고정 네비게이션 바
-    CROP_BOTTOM = 60   # 하단 고정 탭 바
-    EFFECTIVE_H = VIEWPORT_H - CROP_TOP - CROP_BOTTOM  # 실제 유효 높이
+    EFFECTIVE_H = VIEWPORT_H - CROP_TOP - CROP_BOTTOM  # 실제 유효 높이 = 734px
 
     page = await browser.new_page(
         viewport={"width": 390, "height": VIEWPORT_H},
@@ -68,17 +71,16 @@ async def capture_cj(browser):
         cap_height = cap_bottom - cap_top
         print(f"  캡처 범위: y={cap_top} ~ y={cap_bottom} ({cap_height}px)")
 
-        # EFFECTIVE_H 단위로 스크롤하며 캡처
+        # EFFECTIVE_H 단위로 스크롤하며 캡처 (상하단 고정 UI 바 제외)
         cropped_imgs = []
         scroll_y = cap_top
         while scroll_y < cap_bottom:
             await page.evaluate(f"window.scrollTo(0, {scroll_y})")
             await asyncio.sleep(0.6)
 
-            # 이번 뷰포트에서 캡처할 절대 y 범위
-            abs_top    = scroll_y + CROP_TOP          # 유효 영역 절대 상단
-            abs_bottom = scroll_y + VIEWPORT_H - CROP_BOTTOM  # 유효 영역 절대 하단
-            # cap 범위로 클램프
+            # 유효 영역 절대 y
+            abs_top    = scroll_y + CROP_TOP
+            abs_bottom = scroll_y + VIEWPORT_H - CROP_BOTTOM
             actual_top    = max(cap_top, abs_top)
             actual_bottom = min(cap_bottom, abs_bottom)
             if actual_bottom <= actual_top:
@@ -89,18 +91,17 @@ async def capture_cj(browser):
             await page.screenshot(path=tmp_path)
 
             img = Image.open(tmp_path)
-            # 뷰포트 내 crop 좌표
             crop_top_px    = actual_top - scroll_y
             crop_bottom_px = actual_bottom - scroll_y
             cropped = img.crop((0, crop_top_px, img.width, crop_bottom_px))
             cropped_imgs.append(cropped)
+            img.close()
             os.remove(tmp_path)
 
             scroll_y += EFFECTIVE_H
 
         print(f"  {len(cropped_imgs)}구간 캡처 완료: {[img.size for img in cropped_imgs]}")
 
-        # 세로 합치기
         total_w = cropped_imgs[0].width
         total_h = sum(img.height for img in cropped_imgs)
         combined = Image.new("RGB", (total_w, total_h))
@@ -120,14 +121,10 @@ async def capture_cj(browser):
         await page.close()
 
 
-async def capture_hmall(browser):
-    try:
-        from PIL import Image
-    except ImportError:
-        import subprocess
-        subprocess.run(["pip", "install", "Pillow", "--break-system-packages", "-q"])
-    from PIL import Image
-
+# ──────────────────────────────────────────────
+# Hmall (텍스트 파싱)
+# ──────────────────────────────────────────────
+async def collect_hmall(browser):
     context = await browser.new_context(
         viewport={"width": 390, "height": 844},
         user_agent=MOB_UA,
@@ -148,7 +145,6 @@ async def capture_hmall(browser):
     """)
 
     page = await context.new_page()
-    results = []
     try:
         print("[Hmall] 접속 중...")
         os.makedirs(SCREENSHOT_DIR, exist_ok=True)
@@ -227,17 +223,13 @@ async def capture_hmall(browser):
 
         first = card_elements[0]
         print(f"  첫 번째 카드 클릭: '{first['text']}'")
-
-        # 같은 page에서 클릭으로 자연스럽게 상세 페이지 이동
         await page.mouse.click(first['x'], first['y'])
         await asyncio.sleep(5)
         print(f"  상세 페이지 URL: {page.url}")
 
-        # 403 체크
         body_start = await page.evaluate("() => document.body.innerText.slice(0, 50)")
-        print(f"  [DEBUG] 상세 body: {repr(body_start)}")
         if "403 ERROR" in body_start:
-            print("  상세 페이지 403 - 실패")
+            print("  상세 페이지 403 - 수집 불가")
             return []
 
         # 탭 수집
@@ -264,51 +256,58 @@ async def capture_hmall(browser):
         """)
         print(f"  탭 {len(tabs)}개: {[t['text'] for t in tabs]}")
 
-        async def screenshot_full_scroll(tab_index):
-            await page.evaluate("window.scrollTo(0, 0)")
-            await asyncio.sleep(0.5)
-            scroll_height = await page.evaluate("() => document.body.scrollHeight")
-            viewport_h = 844
-            pieces = []
-            sy = 0
-            idx = 0
-            while sy < scroll_height:
-                await page.evaluate(f"window.scrollTo(0, {sy})")
-                await asyncio.sleep(0.4)
-                tmp = os.path.join(SCREENSHOT_DIR, f"hmall_tmp_{tab_index}_{idx}_{today}.png")
-                await page.screenshot(path=tmp, full_page=False)
-                img = Image.open(tmp)
-                remaining = scroll_height - sy
-                if remaining < viewport_h:
-                    img = img.crop((0, 0, img.width, remaining))
-                pieces.append(img.copy())
-                img.close()
-                os.remove(tmp)
-                sy += viewport_h
-                idx += 1
+        async def extract_card_info(tab_name):
+            """현재 페이지에서 카드 행사 정보 파싱"""
+            lines = await page.evaluate("""
+                () => {
+                    const selectors = [
+                        '.event_cont', '.prmo_cont', '.card_info',
+                        '.benefit_cont', '.dc_info', 'main', '#contents',
+                        '.cont_wrap', '.inner'
+                    ];
+                    let el = null;
+                    for (const sel of selectors) {
+                        el = document.querySelector(sel);
+                        if (el && el.innerText.trim().length > 50) break;
+                    }
+                    if (!el) el = document.body;
+                    return el.innerText
+                        .split('\\n')
+                        .map(l => l.trim())
+                        .filter(l => l.length > 0)
+                        .slice(0, 80);
+                }
+            """)
 
-            if len(pieces) == 1:
-                final_path = os.path.join(SCREENSHOT_DIR, f"hmall_{tab_index}_{today}.png")
-                pieces[0].save(final_path)
-                return final_path
+            parsed = {
+                'card_name': tab_name,
+                'discount': '',
+                'limit': '',
+                'period': '',
+                'details': [],
+            }
 
-            total_w = pieces[0].width
-            total_h = sum(p.height for p in pieces)
-            combined = Image.new("RGB", (total_w, total_h))
-            y_off = 0
-            for p in pieces:
-                combined.paste(p, (0, y_off))
-                y_off += p.height
-            final_path = os.path.join(SCREENSHOT_DIR, f"hmall_{tab_index}_{today}.png")
-            combined.save(final_path)
-            print(f"    합치기 완료: {combined.size}")
-            return final_path
+            for j, line in enumerate(lines):
+                if re.search(r'\d+%', line) and any(k in line for k in ['즉시', '청구', '할인']):
+                    if not parsed['discount']:
+                        parsed['discount'] = line
+                if any(k in line for k in ['한도', '최대']) and not parsed['limit']:
+                    parsed['limit'] = line
+                if (re.search(r'20\d\d[./]', line) or ('~' in line and re.search(r'\d+\.\d+', line))) and not parsed['period']:
+                    parsed['period'] = line
+                if any(k in line for k in ['이상', '구매', '적용']) and len(line) < 60:
+                    if line not in parsed['details']:
+                        parsed['details'].append(line)
+
+            return parsed
+
+        cards = []
 
         if len(tabs) == 0:
-            print("  탭 없음 - 현재 페이지 단일 캡처")
-            path = await screenshot_full_scroll(0)
-            results.append({"card_name": first['text'].replace('즉시할인', '').strip(), "path": path})
-            return results
+            info = await extract_card_info(first['text'].replace('즉시할인', '').strip())
+            cards.append(info)
+            print(f"  단일 카드 수집: {info['card_name']} / {info['discount']}")
+            return cards
 
         for i, tab in enumerate(tabs):
             print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
@@ -326,24 +325,20 @@ async def capture_hmall(browser):
                 """)
                 await asyncio.sleep(3)
 
-                # 디버그: 탭 클릭 후 body 확인
-                body_start = await page.evaluate("() => document.body.innerText.slice(0, 100)")
-                print(f"    [DEBUG] 탭 클릭 후 body: {repr(body_start)}")
-
-                body_start = await page.evaluate("() => document.body.innerText.slice(0, 50)")
-                if "403 ERROR" in body_start:
+                body_check = await page.evaluate("() => document.body.innerText.slice(0, 50)")
+                if "403 ERROR" in body_check:
                     print(f"    403 감지 - 건너뜀")
                     continue
 
-                final_path = await screenshot_full_scroll(i)
-                results.append({"card_name": tab['text'], "path": final_path})
-                print(f"    저장: {final_path}")
+                info = await extract_card_info(tab['text'])
+                cards.append(info)
+                print(f"    수집 완료: {info['card_name']} / {info['discount']} / {info['period']}")
 
             except Exception as e:
                 print(f"    오류: {e}")
                 import traceback; traceback.print_exc()
 
-        return results
+        return cards
 
     except Exception as e:
         print(f"  전체 오류: {e}")
@@ -354,7 +349,9 @@ async def capture_hmall(browser):
         await context.close()
 
 
-
+# ──────────────────────────────────────────────
+# 롯데홈쇼핑
+# ──────────────────────────────────────────────
 async def collect_lotte(browser):
     page = await browser.new_page(
         viewport={"width": 1280, "height": 900},
@@ -438,7 +435,7 @@ async def collect_lotte(browser):
                 const results = [];
                 const excluded = ['마이롯데', '마이페이지', '홈', '장바구니'];
                 document.querySelectorAll('a, button, li').forEach(el => {
-                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
+                    const text = el.innerText?.trim().replace(/\s+/g, ' ');
                     if (text && text.length < 15 &&
                         !excluded.includes(text) && (
                         text.includes('롯데') || text.includes('KB') ||
@@ -502,6 +499,46 @@ async def collect_lotte(browser):
         await page.close()
 
 
+# ──────────────────────────────────────────────
+# HTML 생성
+# ──────────────────────────────────────────────
+def make_hmall_html(hmall_cards):
+    if not hmall_cards:
+        return '<p style="color:#aaa;">수집 실패</p>'
+
+    card_colors = ["#185FA5", "#1A5276", "#2E86C1", "#117A65", "#6C3483"]
+    cards_html = ""
+
+    for i, card in enumerate(hmall_cards):
+        color = card_colors[i % len(card_colors)]
+        detail_rows = ""
+        if card.get('period'):
+            detail_rows += f'<tr><td style="color:#999;font-size:11px;padding:2px 0;width:40px;">기간</td><td style="font-size:11px;padding:2px 0;">{card["period"]}</td></tr>'
+        if card.get('limit'):
+            detail_rows += f'<tr><td style="color:#999;font-size:11px;padding:2px 0;">한도</td><td style="font-size:11px;padding:2px 0;">{card["limit"][:40]}</td></tr>'
+        for d in card.get('details', [])[:2]:
+            detail_rows += f'<tr><td style="color:#999;font-size:11px;padding:2px 0;">조건</td><td style="font-size:11px;padding:2px 0;">{d[:40]}</td></tr>'
+
+        discount_text = card.get('discount', '')
+        pct_match = re.search(r'\d+%', discount_text)
+        pct = pct_match.group() if pct_match else '-'
+
+        cards_html += f"""
+        <div style="display:inline-block;vertical-align:top;margin-right:12px;margin-bottom:12px;
+                    width:195px;border-radius:12px;overflow:hidden;border:1px solid #eee;">
+          <div style="background:{color};padding:16px 20px;">
+            <div style="font-size:13px;color:rgba(255,255,255,0.8);margin-bottom:2px;">{card['card_name']}</div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.7);margin-bottom:10px;">즉시할인</div>
+            <div style="font-size:30px;font-weight:700;color:#fff;">{pct}</div>
+          </div>
+          <div style="background:#fff;padding:10px 14px;">
+            <table style="width:100%;border-collapse:collapse;">{detail_rows if detail_rows else '<tr><td style="font-size:11px;color:#aaa;">-</td></tr>'}</table>
+          </div>
+        </div>"""
+
+    return f'<div style="padding:4px 0;">{cards_html}</div>'
+
+
 def make_lotte_html(lotte_cards):
     if not lotte_cards:
         return '<p style="color:#aaa;">수집 실패</p>'
@@ -538,7 +575,10 @@ def make_lotte_html(lotte_cards):
     return f'<div style="padding:4px 0;">{cards_html}</div>'
 
 
-def send_email(cj_path, hmall_results, lotte_cards):
+# ──────────────────────────────────────────────
+# 이메일 발송
+# ──────────────────────────────────────────────
+def send_email(cj_path, hmall_cards, lotte_cards):
     today_str = datetime.now().strftime("%Y년 %m월 %d일")
     weekdays = ["월", "화", "수", "목", "금", "토", "일"]
     weekday = weekdays[datetime.now().weekday()]
@@ -557,20 +597,7 @@ def send_email(cj_path, hmall_results, lotte_cards):
     else:
         cj_block = '<p style="color:#aaa;">수집 실패</p>'
 
-    hmall_blocks = ""
-    if hmall_results:
-        for i, r in enumerate(hmall_results):
-            cid = f"img_hmall_{i}"
-            cid_map[f"hmall_{i}"] = (cid, r["path"])
-            hmall_blocks += f"""
-            <div style="margin-bottom:16px;">
-              <p style="font-size:13px;font-weight:600;color:#185FA5;margin:0 0 6px;
-                        border-left:3px solid #185FA5;padding-left:8px;">{r['card_name']}</p>
-              <img src="cid:{cid}" style="max-width:100%;border:1px solid #eee;border-radius:8px;display:block;">
-            </div>"""
-    else:
-        hmall_blocks = '<p style="color:#aaa;">수집 실패</p>'
-
+    hmall_block = make_hmall_html(hmall_cards)
     lotte_block = make_lotte_html(lotte_cards)
 
     html = f"""<html><body style="font-family:'Malgun Gothic',Arial,sans-serif;
@@ -578,18 +605,22 @@ def send_email(cj_path, hmall_results, lotte_cards):
       <h2 style="border-bottom:2px solid #eee;padding-bottom:12px;font-size:18px;">
         홈쇼핑 카드할인 — {today_str}({weekday})
       </h2>
+
       <h3 style="font-size:15px;border-left:4px solid #E24B4A;padding-left:10px;margin-bottom:10px;">
         CJ온스타일
       </h3>
       {cj_block}
+
       <h3 style="font-size:15px;border-left:4px solid #185FA5;padding-left:10px;margin:28px 0 10px;">
         Hmall — 오늘의 카드할인
       </h3>
-      {hmall_blocks}
+      {hmall_block}
+
       <h3 style="font-size:15px;border-left:4px solid #C0392B;padding-left:10px;margin:28px 0 10px;">
         롯데홈쇼핑 — 오늘의 카드 청구할인
       </h3>
       {lotte_block}
+
       <hr style="border:none;border-top:1px solid #f0f0f0;margin-top:24px;">
       <p style="font-size:11px;color:#bbb;">카드할인 봇 자동 발송</p>
     </body></html>"""
@@ -611,6 +642,9 @@ def send_email(cj_path, hmall_results, lotte_cards):
     print("발송 완료!")
 
 
+# ──────────────────────────────────────────────
+# main
+# ──────────────────────────────────────────────
 async def main():
     print(f"카드할인 봇 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -620,21 +654,21 @@ async def main():
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
         )
 
-        cj_path       = await capture_cj(browser)
-        hmall_results = await capture_hmall(browser)
-        lotte_cards   = await collect_lotte(browser)
+        cj_path     = await capture_cj(browser)
+        hmall_cards = await collect_hmall(browser)
+        lotte_cards = await collect_lotte(browser)
 
         await browser.close()
 
     print(f"\nCJ온스타일: {'성공' if cj_path else '실패'}")
-    print(f"Hmall: {len(hmall_results)}개 카드")
+    print(f"Hmall: {len(hmall_cards)}개 카드 - {[c['card_name'] for c in hmall_cards]}")
     print(f"롯데홈쇼핑: {len(lotte_cards)}개 카드 - {[c['card_name'] for c in lotte_cards]}")
 
     if not GMAIL_USER or not GMAIL_PASSWORD or not TO_EMAIL:
         print("Gmail 환경변수 없음 - 발송 건너뜀")
         return
 
-    send_email(cj_path, hmall_results, lotte_cards)
+    send_email(cj_path, hmall_cards, lotte_cards)
 
 
 if __name__ == "__main__":
