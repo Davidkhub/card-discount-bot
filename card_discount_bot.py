@@ -19,13 +19,12 @@ MOB_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605
 
 
 async def capture_cj(browser):
-        # Pillow 자동 설치
     try:
         from PIL import Image
     except ImportError:
         import subprocess
         subprocess.run(["pip", "install", "Pillow", "--break-system-packages", "-q"])
-    
+
     page = await browser.new_page(
         viewport={"width": 390, "height": 844},
         user_agent=MOB_UA,
@@ -41,109 +40,28 @@ async def capture_cj(browser):
         today = datetime.now().strftime("%Y%m%d")
         path = os.path.join(SCREENSHOT_DIR, f"cj_{today}.png")
 
-        # 스크롤하면서 카드/결제혜택 탭 찾아 클릭
-        tab_found = False
-        for scroll_y in [0, 400, 800, 1200, 1600]:
-            await page.evaluate(f"window.scrollTo(0, {scroll_y})")
-            await asyncio.sleep(1)
+        # 페이지 맨 아래로 스크롤
+        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        await asyncio.sleep(2)
 
-            result = await page.evaluate("""
-                () => {
-                    const all = document.querySelectorAll('a, button, span, div, li');
-                    for (const el of all) {
-                        const text = el.innerText?.trim();
-                        if (text === '카드/결제혜택') {
-                            const rect = el.getBoundingClientRect();
-                            // 뷰포트 안에 있고 클릭 가능한 요소
-                            if (rect.width > 0 && rect.top > 30 && rect.top < 800) {
-                                el.click();
-                                return { x: Math.round(rect.left + rect.width/2), y: Math.round(rect.top), text };
-                            }
-                        }
-                    }
-                    return null;
-                }
-            """)
-            if result:
-                print(f"  카드/결제혜택 탭 클릭 성공: y={result['y']} (scroll={scroll_y})")
-                tab_found = True
-                await asyncio.sleep(4)
-                break
-
-        if not tab_found:
-            print("  탭 못 찾음 - fallback")
-
-        # 클릭 후 카드 영역 절대좌표 찾기
-        card_abs = await page.evaluate("""
-            () => {
-                // 카드/결제혜택 섹션의 카드 아이템만 찾기
-                // '오늘 종료', '1일 남음' 등 딱지가 붙은 카드 컨테이너
-                const candidates = [];
-                document.querySelectorAll('*').forEach(el => {
-                    const text = el.innerText?.trim() || '';
-                    if (text.includes('즉시할인') && text.includes('%')
-                        && text.length < 100
-                        && !text.includes('쿠폰') && !text.includes('적립금')
-                        && !text.includes('브랜드') && !text.includes('다운로드')) {
-                        const rect = el.getBoundingClientRect();
-                        const absY = rect.top + window.scrollY;
-                        if (rect.width > 100 && rect.height > 80 && absY > 500) {
-                            candidates.push({
-                                absY: Math.round(absY),
-                                absYEnd: Math.round(absY + rect.height),
-                                x: Math.round(rect.left),
-                                width: Math.round(rect.width),
-                                height: Math.round(rect.height)
-                            });
-                        }
-                    }
-                });
-                if (candidates.length === 0) return null;
-                const minAbsY = Math.min(...candidates.map(c => c.absY));
-                const maxAbsY = Math.max(...candidates.map(c => c.absYEnd));
-                const minX = Math.min(...candidates.map(c => c.x));
-                const maxX = Math.max(...candidates.map(c => c.x + c.width));
-                return { absY: minAbsY, absYEnd: maxAbsY, x: minX, width: maxX - minX, count: candidates.length };
-            }
+        # 맨 아래 스크롤 위치 확인
+        scroll_info = await page.evaluate("""
+            () => ({
+                scrollY: window.scrollY,
+                totalHeight: document.body.scrollHeight,
+                viewportHeight: window.innerHeight
+            })
         """)
-        print(f"  카드 절대좌표: {card_abs}")
+        print(f"  스크롤 정보: {scroll_info}")
 
-        captured = False
-        if card_abs and card_abs['absYEnd'] - card_abs['absY'] > 100:
-            # 카드 영역 시작점으로 스크롤
-            await page.evaluate(f"window.scrollTo(0, {max(0, card_abs['absY'] - 100)})")
-            await asyncio.sleep(2)
+        # 맨 아래에서 뷰포트 2개 위로 올라가서 캡처
+        target_scroll = max(0, scroll_info['scrollY'] - scroll_info['viewportHeight'])
+        await page.evaluate(f"window.scrollTo(0, {target_scroll})")
+        await asyncio.sleep(2)
 
-            # full_page=True로 전체 카드 영역 캡처
-            temp_path = os.path.join(SCREENSHOT_DIR, f"cj_full_{today}.png")
-            await page.screenshot(path=temp_path, full_page=True)
-
-            # PIL로 카드 영역만 크롭
-            try:
-                from PIL import Image
-                img = Image.open(temp_path)
-                # 카드 시작~끝 영역 크롭 (2x scale 고려)
-                scale = img.width / 390
-                crop_top = int(max(0, card_abs['absY'] - 80) * scale)
-                crop_bottom = int((card_abs['absYEnd'] + 50) * scale)
-                crop_left = int(max(0, card_abs['x'] - 10) * scale)
-                crop_right = int(min(img.width, (card_abs['x'] + card_abs['width'] + 10) * scale))
-                cropped = img.crop((crop_left, crop_top, crop_right, crop_bottom))
-                cropped.save(path)
-                print(f"  PIL 크롭 성공: {cropped.size}")
-                captured = True
-                os.remove(temp_path)
-            except Exception as e:
-                print(f"  PIL 실패: {e} - full 스크린샷 사용")
-                import shutil
-                shutil.move(temp_path, path)
-                captured = True
-
-        if not captured:
-            await page.evaluate("window.scrollTo(0, 1200)")
-            await asyncio.sleep(1)
-            await page.screenshot(path=path)
-            print("  전체 페이지 캡처 (fallback)")
+        # 현재 뷰포트 스크린샷
+        await page.screenshot(path=path)
+        print(f"  캡처 성공 (scroll_y={target_scroll})")
 
         return path
     except Exception as e:
