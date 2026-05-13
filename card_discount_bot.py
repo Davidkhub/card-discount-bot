@@ -40,28 +40,47 @@ async def capture_cj(browser):
         today = datetime.now().strftime("%Y%m%d")
         path = os.path.join(SCREENSHOT_DIR, f"cj_{today}.png")
 
-        # 페이지 맨 아래로 스크롤
-        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        # 천천히 맨 아래로 스크롤 (lazy-load 트리거)
+        print("  천천히 스크롤 중...")
+        total_height = await page.evaluate("() => document.body.scrollHeight")
+        pos = 0
+        while pos < total_height:
+            pos += 300
+            await page.evaluate(f"window.scrollTo(0, {pos})")
+            await asyncio.sleep(0.5)
+            total_height = await page.evaluate("() => document.body.scrollHeight")
         await asyncio.sleep(2)
 
-        # 맨 아래 스크롤 위치 확인
-        scroll_info = await page.evaluate("""
-            () => ({
-                scrollY: window.scrollY,
-                totalHeight: document.body.scrollHeight,
-                viewportHeight: window.innerHeight
-            })
-        """)
-        print(f"  스크롤 정보: {scroll_info}")
+        # 맨 아래 scrollY 확인
+        bottom_scroll = await page.evaluate("() => document.body.scrollHeight - window.innerHeight")
+        print(f"  맨 아래 scrollY: {bottom_scroll}")
 
-        # 맨 아래에서 뷰포트 2개 위로 올라가서 캡처
-        target_scroll = max(0, scroll_info['scrollY'] - scroll_info['viewportHeight'])
-        await page.evaluate(f"window.scrollTo(0, {target_scroll})")
-        await asyncio.sleep(2)
+        # 맨 아래에서 스크린샷 1장
+        await page.evaluate(f"window.scrollTo(0, {bottom_scroll})")
+        await asyncio.sleep(1)
+        path1 = os.path.join(SCREENSHOT_DIR, f"cj_bottom_{today}.png")
+        await page.screenshot(path=path1)
+        print("  하단 스크린샷 저장")
 
-        # 현재 뷰포트 스크린샷
-        await page.screenshot(path=path)
-        print(f"  캡처 성공 (scroll_y={target_scroll})")
+        # 750px 위로 올려서 스크린샷 1장
+        await page.evaluate(f"window.scrollTo(0, {max(0, bottom_scroll - 750)})")
+        await asyncio.sleep(1)
+        path2 = os.path.join(SCREENSHOT_DIR, f"cj_upper_{today}.png")
+        await page.screenshot(path=path2)
+        print("  상단 스크린샷 저장")
+
+        # 두 장을 세로로 합치기
+        from PIL import Image
+        img1 = Image.open(path2)  # 위 이미지
+        img2 = Image.open(path1)  # 아래 이미지
+        combined = Image.new("RGB", (img1.width, img1.height + img2.height))
+        combined.paste(img1, (0, 0))
+        combined.paste(img2, (0, img1.height))
+        combined.save(path)
+        print(f"  합치기 완료: {combined.size}")
+
+        os.remove(path1)
+        os.remove(path2)
 
         return path
     except Exception as e:
@@ -191,11 +210,28 @@ async def capture_hmall(browser):
                 await asyncio.sleep(4)
                 path = os.path.join(SCREENSHOT_DIR, f"hmall_{i}_{today}.png")
                 await page.screenshot(path=path, full_page=True)
-                page_text = await page.evaluate("() => document.body.innerText.slice(0, 100)")
-                if "403" in page_text or "ERROR" in page_text:
-                    print(f"    403 에러 감지 - 건너뜀")
-                    continue
+
+                # 403 에러 확인 - 텍스트뿐 아니라 이미지로도 확인
+                page_text = await page.evaluate("() => document.body.innerText.slice(0, 200)")
+                print(f"    페이지 텍스트: {page_text[:80]}")
+                if "403" in page_text or "request could not be satisfied" in page_text.lower():
+                    print(f"    403 에러 감지 - User-Agent 변경 후 재시도")
+                    # 새 페이지로 직접 URL 접속 시도
+                    current_url = page.url
+                    await page.goto(
+                        current_url,
+                        wait_until="domcontentloaded",
+                        timeout=20000
+                    )
+                    await asyncio.sleep(3)
+                    page_text2 = await page.evaluate("() => document.body.innerText.slice(0, 200)")
+                    if "403" in page_text2 or "request could not be satisfied" in page_text2.lower():
+                        print(f"    재시도 후도 403 - 건너뜀")
+                        continue
+                    await page.screenshot(path=path, full_page=True)
+
                 results.append({"card_name": tab['text'], "path": path})
+                print(f"    저장 완료")
             except Exception as e:
                 print(f"    오류: {e}")
 
