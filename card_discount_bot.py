@@ -1,125 +1,3 @@
-#!/usr/bin/env python3
-import asyncio
-import smtplib
-import os
-import re
-from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.image import MIMEImage
-from playwright.async_api import async_playwright
-
-GMAIL_USER     = os.environ.get("GMAIL_USER", "")
-GMAIL_PASSWORD = os.environ.get("GMAIL_PASSWORD", "")
-TO_EMAIL       = os.environ.get("TO_EMAIL", "")
-SCREENSHOT_DIR = "screenshots"
-
-PC_UA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-MOB_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
-
-VIEWPORT_H = 844  # 뷰포트 높이
-
-
-async def capture_cj(browser):
-    try:
-        from PIL import Image
-    except ImportError:
-        import subprocess
-        subprocess.run(["pip", "install", "Pillow", "--break-system-packages", "-q"])
-    from PIL import Image
-
-    CROP_TOP    = 50   # 상단 고정 네비게이션 바
-    CROP_BOTTOM = 60   # 하단 고정 탭 바
-    EFFECTIVE_H = VIEWPORT_H - CROP_TOP - CROP_BOTTOM  # 실제 유효 높이
-
-    page = await browser.new_page(
-        viewport={"width": 390, "height": VIEWPORT_H},
-        user_agent=MOB_UA,
-    )
-    try:
-        print("[CJ온스타일] 접속 중...")
-        await page.goto(
-            "https://display.cjonstyle.com/m/homeTab/main?hmtabMenuId=H00009",
-            wait_until="networkidle", timeout=40000,
-        )
-        await asyncio.sleep(5)
-        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-        today = datetime.now().strftime("%Y%m%d")
-        path = os.path.join(SCREENSHOT_DIR, f"cj_{today}.png")
-
-        # 천천히 맨 아래로 스크롤 (lazy-load 트리거)
-        print("  천천히 스크롤 중...")
-        total_height = await page.evaluate("() => document.body.scrollHeight")
-        pos = 0
-        while pos < total_height:
-            pos += 300
-            await page.evaluate(f"window.scrollTo(0, {pos})")
-            await asyncio.sleep(0.5)
-            total_height = await page.evaluate("() => document.body.scrollHeight")
-        await asyncio.sleep(2)
-
-        doc_height = await page.evaluate("() => document.body.scrollHeight")
-        bottom_scroll = doc_height - VIEWPORT_H
-        print(f"  맨 아래 scrollY: {bottom_scroll}, 문서 총 높이: {doc_height}")
-
-        # 캡처 범위: 맨 아래에서 750px 올라간 지점부터 위로 2800px
-        cap_bottom = doc_height - 750
-        cap_top    = max(0, cap_bottom - 2800)
-        cap_height = cap_bottom - cap_top
-        print(f"  캡처 범위: y={cap_top} ~ y={cap_bottom} ({cap_height}px)")
-
-        # EFFECTIVE_H 단위로 스크롤하며 캡처
-        cropped_imgs = []
-        scroll_y = cap_top
-        while scroll_y < cap_bottom:
-            await page.evaluate(f"window.scrollTo(0, {scroll_y})")
-            await asyncio.sleep(0.6)
-
-            # 이번 뷰포트에서 캡처할 절대 y 범위
-            abs_top    = scroll_y + CROP_TOP          # 유효 영역 절대 상단
-            abs_bottom = scroll_y + VIEWPORT_H - CROP_BOTTOM  # 유효 영역 절대 하단
-            # cap 범위로 클램프
-            actual_top    = max(cap_top, abs_top)
-            actual_bottom = min(cap_bottom, abs_bottom)
-            if actual_bottom <= actual_top:
-                scroll_y += EFFECTIVE_H
-                continue
-
-            tmp_path = os.path.join(SCREENSHOT_DIR, f"cj_tmp_{scroll_y}_{today}.png")
-            await page.screenshot(path=tmp_path)
-
-            img = Image.open(tmp_path)
-            # 뷰포트 내 crop 좌표
-            crop_top_px    = actual_top - scroll_y
-            crop_bottom_px = actual_bottom - scroll_y
-            cropped = img.crop((0, crop_top_px, img.width, crop_bottom_px))
-            cropped_imgs.append(cropped)
-            os.remove(tmp_path)
-
-            scroll_y += EFFECTIVE_H
-
-        print(f"  {len(cropped_imgs)}구간 캡처 완료: {[img.size for img in cropped_imgs]}")
-
-        # 세로 합치기
-        total_w = cropped_imgs[0].width
-        total_h = sum(img.height for img in cropped_imgs)
-        combined = Image.new("RGB", (total_w, total_h))
-        y_offset = 0
-        for img in cropped_imgs:
-            combined.paste(img, (0, y_offset))
-            y_offset += img.height
-        combined.save(path)
-        print(f"  합치기 완료: {combined.size}")
-        return path
-
-    except Exception as e:
-        print(f"  오류: {e}")
-        import traceback; traceback.print_exc()
-        return None
-    finally:
-        await page.close()
-
-
 async def capture_hmall(browser):
     try:
         from PIL import Image
@@ -128,28 +6,18 @@ async def capture_hmall(browser):
         subprocess.run(["pip", "install", "Pillow", "--break-system-packages", "-q"])
     from PIL import Image
 
-    # stealth 설정을 위한 컨텍스트 생성
     context = await browser.new_context(
         viewport={"width": 390, "height": 844},
         user_agent=MOB_UA,
         locale="ko-KR",
         timezone_id="Asia/Seoul",
         extra_http_headers={
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Encoding": "gzip, deflate, br",
-            "sec-ch-ua": '"Chromium";v="124", "Not-A.Brand";v="99"',
+            "Accept-Language": "ko-KR,ko;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "sec-ch-ua-mobile": "?1",
             "sec-ch-ua-platform": '"Android"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "same-origin",
-            "Sec-Fetch-User": "?1",
-            "Upgrade-Insecure-Requests": "1",
         }
     )
-
-    # navigator.webdriver 숨기기
     await context.add_init_script("""
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
         Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
@@ -161,23 +29,19 @@ async def capture_hmall(browser):
     results = []
     try:
         print("[Hmall] 접속 중...")
-        # 1단계: 메인 먼저 방문 (세션/쿠키 확보)
+        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+        today = datetime.now().strftime("%Y%m%d")
+
+        # 1단계: 메인 방문으로 쿠키 확보
         try:
-            await page.goto(
-                "https://www.hmall.com/",
-                wait_until="domcontentloaded", timeout=40000
-            )
+            await page.goto("https://www.hmall.com/", wait_until="domcontentloaded", timeout=40000)
         except Exception as e:
             print(f"  메인 goto 예외 무시: {e}")
         await asyncio.sleep(3)
-
-        # 사람처럼 약간 스크롤
-        await page.evaluate("window.scrollTo(0, 300)")
-        await asyncio.sleep(1)
-        await page.evaluate("window.scrollTo(0, 0)")
+        await page.evaluate("window.scrollTo(0, 500)")
         await asyncio.sleep(1)
 
-        # 2단계: 혜택 탭이 있는 페이지로 이동
+        # 2단계: 혜택 탭 페이지
         try:
             await page.goto(
                 f"https://www.hmall.com/md/dpl/index?_={datetime.now().strftime('%Y%m%d%H%M%S')}",
@@ -186,9 +50,6 @@ async def capture_hmall(browser):
         except Exception as e:
             print(f"  goto 예외 무시: {e}")
         await asyncio.sleep(5)
-
-        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-        today = datetime.now().strftime("%Y%m%d")
 
         # 팝업 제거
         try:
@@ -214,7 +75,17 @@ async def capture_hmall(browser):
         await page.evaluate("window.scrollTo(0, 900)")
         await asyncio.sleep(2)
 
-        # 카드 요소 찾기
+        # 즉시할인 카드 클릭 → 네트워크 요청에서 상세 URL 캡처
+        detail_url = None
+
+        async def handle_request(request):
+            nonlocal detail_url
+            if "crdDmndDcPrmo" in request.url or "prmoNo" in request.url:
+                detail_url = request.url
+                print(f"  [네트워크] 상세 URL 감지: {request.url}")
+
+        page.on("request", handle_request)
+
         card_elements = await page.evaluate("""
             () => {
                 const results = [];
@@ -244,61 +115,59 @@ async def capture_hmall(browser):
 
         first = card_elements[0]
         print(f"  첫 번째 카드 클릭: '{first['text']}'")
-
-        # 3단계: 상세 페이지 URL을 href에서 직접 추출해서 goto로 이동
-        detail_url = await page.evaluate("""
-            () => {
-                let target = null;
-                document.querySelectorAll('*').forEach(el => {
-                    if (el.innerText?.trim() === '즉시할인') {
-                        let parent = el;
-                        for (let i = 0; i < 10; i++) {
-                            parent = parent.parentElement;
-                            if (!parent) break;
-                            if (parent.tagName === 'A' && parent.href) {
-                                target = parent.href;
-                                break;
-                            }
-                            const a = parent.querySelector('a[href]');
-                            if (a) { target = a.href; break; }
-                        }
-                    }
-                });
-                return target;
-            }
-        """)
-
-        if detail_url:
-            print(f"  상세 URL 추출: {detail_url}")
-            # Referer 헤더를 메인으로 설정하고 이동
-            await page.set_extra_http_headers({"Referer": "https://www.hmall.com/md/dpl/index"})
-            try:
-                await page.goto(detail_url, wait_until="domcontentloaded", timeout=40000)
-            except Exception as e:
-                print(f"  상세 goto 예외 무시: {e}")
-        else:
-            print("  href 없음 - 마우스 클릭으로 이동")
-            await page.mouse.click(first['x'], first['y'])
-
+        await page.mouse.click(first['x'], first['y'])
         await asyncio.sleep(4)
-        print(f"  상세 페이지 URL: {page.url}")
+        print(f"  현재 URL: {page.url}")
 
-        # 403 체크
-        page_text = await page.evaluate("() => document.body.innerText.slice(0, 100)")
-        print(f"  [DEBUG] 상세 body: {repr(page_text[:100])}")
-        if "403" in page_text:
-            print("  상세 페이지 403 - 실패")
+        page.remove_listener("request", handle_request)
+
+        # 현재 URL이 상세 페이지인지 확인
+        current_url = page.url
+        if "crdDmndDcPrmo" in current_url or "prmoNo" in current_url:
+            detail_url = current_url
+
+        print(f"  상세 URL: {detail_url}")
+
+        # 상세 URL을 못 잡았으면 JS로 history 확인
+        if not detail_url:
+            js_url = await page.evaluate("() => location.href")
+            print(f"  JS location.href: {js_url}")
+            if "crdDmndDcPrmo" in js_url or "prmoNo" in js_url:
+                detail_url = js_url
+
+        if not detail_url:
+            print("  상세 URL 확보 실패")
             return []
 
-        # 탭 목록 수집
-        tabs = await page.evaluate("""
+        # 3단계: 상세 페이지를 새 탭에서 직접 goto (Referer 포함)
+        detail_page = await context.new_page()
+        await detail_page.set_extra_http_headers({
+            "Referer": "https://www.hmall.com/md/dpl/index",
+        })
+        try:
+            await detail_page.goto(detail_url, wait_until="domcontentloaded", timeout=40000)
+        except Exception as e:
+            print(f"  상세 페이지 goto 예외 무시: {e}")
+        await asyncio.sleep(4)
+
+        check = await detail_page.evaluate("() => document.body.innerText.slice(0, 150)")
+        print(f"  [DEBUG] 상세 body: {repr(check)}")
+        if "403 ERROR" in check:
+            print("  상세 페이지 403 - 실패")
+            await detail_page.close()
+            return []
+
+        # 탭 수집
+        tabs = await detail_page.evaluate("""
             () => {
                 const results = [];
+                const seen = new Set();
                 document.querySelectorAll('a, button, li, div[role="tab"]').forEach(el => {
                     const text = el.innerText?.trim().replace(/\s+/g, ' ');
-                    if (text && text.length < 30 && /%/.test(text)) {
+                    if (text && text.length < 30 && /%/.test(text) && !seen.has(text)) {
                         const rect = el.getBoundingClientRect();
                         if (rect.width > 0 && rect.height > 0) {
+                            seen.add(text);
                             results.push({
                                 tag: el.tagName, text,
                                 x: Math.round(rect.left + rect.width / 2),
@@ -312,64 +181,57 @@ async def capture_hmall(browser):
         """)
         print(f"  탭 {len(tabs)}개: {[t['text'] for t in tabs]}")
 
-        async def screenshot_full_scroll(tab_index):
-            await page.evaluate("window.scrollTo(0, 0)")
+        async def screenshot_full_scroll(pg, tab_index):
+            await pg.evaluate("window.scrollTo(0, 0)")
             await asyncio.sleep(0.5)
-            scroll_height = await page.evaluate("() => document.body.scrollHeight")
+            scroll_height = await pg.evaluate("() => document.body.scrollHeight")
             viewport_h = 844
-            shot_paths = []
-            sy = 0
-            shot_idx = 0
-            while sy < scroll_height:
-                await page.evaluate(f"window.scrollTo(0, {sy})")
-                await asyncio.sleep(0.4)
-                tmp = os.path.join(SCREENSHOT_DIR, f"hmall_tmp_{tab_index}_s{shot_idx}_{today}.png")
-                await page.screenshot(path=tmp, full_page=False)
-                shot_paths.append((sy, tmp))
-                sy += viewport_h
-                shot_idx += 1
-
-            if len(shot_paths) == 1:
-                final_path = os.path.join(SCREENSHOT_DIR, f"hmall_{tab_index}_{today}.png")
-                os.rename(shot_paths[0][1], final_path)
-                return final_path
-
             pieces = []
-            for sy_val, tmp_path in shot_paths:
-                img = Image.open(tmp_path)
-                remaining = scroll_height - sy_val
+            sy = 0
+            idx = 0
+            while sy < scroll_height:
+                await pg.evaluate(f"window.scrollTo(0, {sy})")
+                await asyncio.sleep(0.4)
+                tmp = os.path.join(SCREENSHOT_DIR, f"hmall_tmp_{tab_index}_{idx}_{today}.png")
+                await pg.screenshot(path=tmp, full_page=False)
+                img = Image.open(tmp)
+                remaining = scroll_height - sy
                 if remaining < viewport_h:
                     img = img.crop((0, 0, img.width, remaining))
-                pieces.append((sy_val, img))
+                pieces.append(img.copy())
+                img.close()
+                os.remove(tmp)
+                sy += viewport_h
+                idx += 1
 
-            total_w = pieces[0][1].width
-            combined = Image.new("RGB", (total_w, scroll_height))
-            for sy_val, img in pieces:
-                combined.paste(img, (0, sy_val))
+            if len(pieces) == 1:
+                final_path = os.path.join(SCREENSHOT_DIR, f"hmall_{tab_index}_{today}.png")
+                pieces[0].save(final_path)
+                return final_path
 
+            total_w = pieces[0].width
+            total_h = sum(p.height for p in pieces)
+            combined = Image.new("RGB", (total_w, total_h))
+            y_off = 0
+            for p in pieces:
+                combined.paste(p, (0, y_off))
+                y_off += p.height
             final_path = os.path.join(SCREENSHOT_DIR, f"hmall_{tab_index}_{today}.png")
             combined.save(final_path)
-            for _, img in pieces:
-                img.close()
-            for _, tmp_path in shot_paths:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
             print(f"    합치기 완료: {combined.size}")
             return final_path
 
         if len(tabs) == 0:
             print("  탭 없음 - 현재 페이지 단일 캡처")
-            path = os.path.join(SCREENSHOT_DIR, f"hmall_0_{today}.png")
-            await page.evaluate("window.scrollTo(0, 0)")
-            await asyncio.sleep(0.5)
-            await page.screenshot(path=path, full_page=False)
+            path = await screenshot_full_scroll(detail_page, 0)
             results.append({"card_name": first['text'].replace('즉시할인', '').strip(), "path": path})
+            await detail_page.close()
             return results
 
         for i, tab in enumerate(tabs):
             print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
             try:
-                await page.evaluate(f"""
+                await detail_page.evaluate(f"""
                     () => {{
                         const tabs = [...document.querySelectorAll('a, button, li, div[role="tab"]')]
                             .filter(el => {{
@@ -382,12 +244,13 @@ async def capture_hmall(browser):
                 """)
                 await asyncio.sleep(3)
 
-                page_text = await page.evaluate("() => document.body.innerText.slice(0, 100)")
-                if "403" in page_text:
+                # 403 체크: "403 ERROR" 문자열 전체로만 판단
+                body_start = await detail_page.evaluate("() => document.body.innerText.slice(0, 50)")
+                if "403 ERROR" in body_start:
                     print(f"    403 감지 - 건너뜀")
                     continue
 
-                final_path = await screenshot_full_scroll(i)
+                final_path = await screenshot_full_scroll(detail_page, i)
                 results.append({"card_name": tab['text'], "path": final_path})
                 print(f"    저장: {final_path}")
 
@@ -395,6 +258,7 @@ async def capture_hmall(browser):
                 print(f"    오류: {e}")
                 import traceback; traceback.print_exc()
 
+        await detail_page.close()
         return results
 
     except Exception as e:
@@ -404,290 +268,3 @@ async def capture_hmall(browser):
     finally:
         await page.close()
         await context.close()
-
-
-
-async def collect_lotte(browser):
-    page = await browser.new_page(
-        viewport={"width": 1280, "height": 900},
-        user_agent=PC_UA,
-    )
-    try:
-        print("[롯데홈쇼핑] 접속 중...")
-
-        async def block_fonts(route):
-            if route.request.resource_type == "font":
-                await route.abort()
-            else:
-                await route.continue_()
-        await page.route("**/*", block_fonts)
-
-        try:
-            await page.goto("https://www.lotteimall.com/", wait_until="domcontentloaded", timeout=40000)
-        except Exception as e:
-            print(f"  goto 예외 무시: {e}")
-        await asyncio.sleep(6)
-
-        for selector in [".btn_close", ".pop_close", "[class*='close']", "[aria-label='닫기']"]:
-            try:
-                els = await page.query_selector_all(selector)
-                for el in els:
-                    if await el.is_visible():
-                        await el.click(force=True)
-                        await asyncio.sleep(0.3)
-            except Exception:
-                pass
-
-        section = await page.query_selector("[class*='f_bnr_card_prom']")
-        if not section:
-            print("  카드 섹션 못 찾음")
-            return []
-
-        text = await section.inner_text()
-        print(f"  섹션 텍스트:\n{text}")
-
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        cards = []
-        in_today = False
-        for i, line in enumerate(lines):
-            if line == "오늘":
-                in_today = True
-                continue
-            if in_today and re.match(r"^\d+\.\d+", line):
-                break
-            if in_today and line == "청구할인":
-                card_name = lines[i - 1] if i > 0 else ""
-                pct = lines[i + 1] if i + 1 < len(lines) and re.match(r"^\d+%$", lines[i + 1]) else ""
-                if card_name and not re.match(r"^\d+\.\d+", card_name) and card_name != "오늘":
-                    if not any(c["card_name"] == card_name for c in cards):
-                        cards.append({"card_name": card_name, "discount": pct})
-                        print(f"  카드 파싱: {card_name} {pct}")
-
-        if not cards:
-            print("  파싱 실패")
-            return []
-
-        await section.scroll_into_view_if_needed()
-        await asyncio.sleep(2)
-        await page.evaluate("""
-            () => {
-                const section = document.querySelector("[class*='f_bnr_card_prom']");
-                const link = section?.querySelector('a');
-                if (link) link.click();
-            }
-        """)
-        await asyncio.sleep(3)
-        detail_url = page.url
-        print(f"  상세 페이지 URL: {detail_url}")
-
-        if "viewMain" in detail_url or "lotteimall.com" not in detail_url:
-            print("  상세 페이지 이동 실패 - 텍스트 정보만 발송")
-            return cards
-
-        tabs = await page.evaluate("""
-            () => {
-                const seen = new Set();
-                const results = [];
-                const excluded = ['마이롯데', '마이페이지', '홈', '장바구니'];
-                document.querySelectorAll('a, button, li').forEach(el => {
-                    const text = el.innerText?.trim().replace(/\\s+/g, ' ');
-                    if (text && text.length < 15 &&
-                        !excluded.includes(text) && (
-                        text.includes('롯데') || text.includes('KB') ||
-                        text.includes('현대') || text.includes('삼성') ||
-                        text.includes('신한') || text.includes('하나') ||
-                        text.includes('NH') || text.includes('농협') ||
-                        text.includes('비씨') || text.includes('BC') ||
-                        text.includes('카드')
-                    )) {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 30 && rect.height > 10 && !seen.has(text)) {
-                            seen.add(text);
-                            results.push({
-                                tag: el.tagName, text,
-                                x: Math.round(rect.left + rect.width / 2),
-                                y: Math.round(rect.top + rect.height / 2),
-                            });
-                        }
-                    }
-                });
-                return results;
-            }
-        """)
-        print(f"  상세 탭 {len(tabs)}개: {[t['text'] for t in tabs]}")
-
-        if not tabs:
-            print("  탭 없음 - 현재 페이지 텍스트 수집")
-            detail = await page.evaluate("() => document.body.innerText.trim().slice(0, 800)")
-            for card in cards:
-                card["detail"] = detail
-            return cards
-
-        for i, tab in enumerate(tabs):
-            print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
-            try:
-                await page.mouse.click(tab['x'], tab['y'])
-                await asyncio.sleep(2)
-                detail = await page.evaluate("""
-                    () => {
-                        for (const sel of ['.event_cont', '.card_cont', '#contents', 'main', '.cont_area']) {
-                            const el = document.querySelector(sel);
-                            if (el) return el.innerText.trim().slice(0, 800);
-                        }
-                        return document.body.innerText.trim().slice(0, 800);
-                    }
-                """)
-                for card in cards:
-                    if card["card_name"] in tab["text"] or tab["text"] in card["card_name"]:
-                        card["detail"] = detail
-                        break
-                print(f"    수집 완료")
-            except Exception as e:
-                print(f"    오류: {e}")
-
-        return cards
-
-    except Exception as e:
-        print(f"  전체 오류: {e}")
-        return []
-    finally:
-        await page.close()
-
-
-def make_lotte_html(lotte_cards):
-    if not lotte_cards:
-        return '<p style="color:#aaa;">수집 실패</p>'
-
-    card_colors = ["#C0392B", "#D4AC0D", "#1A5276", "#117A65", "#6C3483"]
-    cards_html = ""
-
-    for i, card in enumerate(lotte_cards):
-        color = card_colors[i % len(card_colors)]
-        pct = card.get("discount", "")
-        detail_rows = ""
-        detail = card.get("detail", "")
-        if detail:
-            lines = [l.strip() for l in detail.splitlines() if l.strip()]
-            for j, line in enumerate(lines):
-                if "행사내용" in line and j + 1 < len(lines):
-                    detail_rows += f'<tr><td style="color:#999;font-size:11px;padding:2px 0;width:60px;">내용</td><td style="font-size:11px;padding:2px 0;">{lines[j+1][:70]}</td></tr>'
-                elif "할인한도" in line and j + 1 < len(lines):
-                    detail_rows += f'<tr><td style="color:#999;font-size:11px;padding:2px 0;">한도</td><td style="font-size:11px;padding:2px 0;">{lines[j+1][:50]}</td></tr>'
-
-        cards_html += f"""
-        <div style="display:inline-block;vertical-align:top;margin-right:12px;margin-bottom:12px;
-                    width:195px;border-radius:12px;overflow:hidden;border:1px solid #eee;">
-          <div style="background:{color};padding:16px 20px;">
-            <div style="font-size:13px;color:rgba(255,255,255,0.8);margin-bottom:2px;">{card['card_name']}</div>
-            <div style="font-size:12px;color:rgba(255,255,255,0.7);margin-bottom:10px;">청구할인</div>
-            <div style="font-size:30px;font-weight:700;color:#fff;">{pct}</div>
-          </div>
-          <div style="background:#fff;padding:10px 14px;">
-            <table style="width:100%;border-collapse:collapse;">{detail_rows if detail_rows else '<tr><td style="font-size:11px;color:#aaa;">-</td></tr>'}</table>
-          </div>
-        </div>"""
-
-    return f'<div style="padding:4px 0;">{cards_html}</div>'
-
-
-def send_email(cj_path, hmall_results, lotte_cards):
-    today_str = datetime.now().strftime("%Y년 %m월 %d일")
-    weekdays = ["월", "화", "수", "목", "금", "토", "일"]
-    weekday = weekdays[datetime.now().weekday()]
-    subject = f"[카드할인봇] {today_str}({weekday}) 홈쇼핑 카드할인"
-
-    msg = MIMEMultipart("related")
-    msg["Subject"] = subject
-    msg["From"] = GMAIL_USER
-    msg["To"] = TO_EMAIL
-
-    cid_map = {}
-
-    if cj_path and os.path.exists(cj_path):
-        cid_map["cj"] = ("img_cj", cj_path)
-        cj_block = '<img src="cid:img_cj" style="max-width:100%;border:1px solid #eee;border-radius:8px;display:block;">'
-    else:
-        cj_block = '<p style="color:#aaa;">수집 실패</p>'
-
-    hmall_blocks = ""
-    if hmall_results:
-        for i, r in enumerate(hmall_results):
-            cid = f"img_hmall_{i}"
-            cid_map[f"hmall_{i}"] = (cid, r["path"])
-            hmall_blocks += f"""
-            <div style="margin-bottom:16px;">
-              <p style="font-size:13px;font-weight:600;color:#185FA5;margin:0 0 6px;
-                        border-left:3px solid #185FA5;padding-left:8px;">{r['card_name']}</p>
-              <img src="cid:{cid}" style="max-width:100%;border:1px solid #eee;border-radius:8px;display:block;">
-            </div>"""
-    else:
-        hmall_blocks = '<p style="color:#aaa;">수집 실패</p>'
-
-    lotte_block = make_lotte_html(lotte_cards)
-
-    html = f"""<html><body style="font-family:'Malgun Gothic',Arial,sans-serif;
-                                  max-width:700px;margin:0 auto;padding:24px;color:#333;">
-      <h2 style="border-bottom:2px solid #eee;padding-bottom:12px;font-size:18px;">
-        홈쇼핑 카드할인 — {today_str}({weekday})
-      </h2>
-      <h3 style="font-size:15px;border-left:4px solid #E24B4A;padding-left:10px;margin-bottom:10px;">
-        CJ온스타일
-      </h3>
-      {cj_block}
-      <h3 style="font-size:15px;border-left:4px solid #185FA5;padding-left:10px;margin:28px 0 10px;">
-        Hmall — 오늘의 카드할인
-      </h3>
-      {hmall_blocks}
-      <h3 style="font-size:15px;border-left:4px solid #C0392B;padding-left:10px;margin:28px 0 10px;">
-        롯데홈쇼핑 — 오늘의 카드 청구할인
-      </h3>
-      {lotte_block}
-      <hr style="border:none;border-top:1px solid #f0f0f0;margin-top:24px;">
-      <p style="font-size:11px;color:#bbb;">카드할인 봇 자동 발송</p>
-    </body></html>"""
-
-    msg.attach(MIMEText(html, "html", "utf-8"))
-
-    for key, (cid, path) in cid_map.items():
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                img = MIMEImage(f.read())
-                img.add_header("Content-ID", f"<{cid}>")
-                img.add_header("Content-Disposition", "inline")
-                msg.attach(img)
-
-    print(f"\n이메일 발송 중 -> {TO_EMAIL}")
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(GMAIL_USER, GMAIL_PASSWORD)
-        smtp.send_message(msg)
-    print("발송 완료!")
-
-
-async def main():
-    print(f"카드할인 봇 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-        )
-
-        cj_path       = await capture_cj(browser)
-        hmall_results = await capture_hmall(browser)
-        lotte_cards   = await collect_lotte(browser)
-
-        await browser.close()
-
-    print(f"\nCJ온스타일: {'성공' if cj_path else '실패'}")
-    print(f"Hmall: {len(hmall_results)}개 카드")
-    print(f"롯데홈쇼핑: {len(lotte_cards)}개 카드 - {[c['card_name'] for c in lotte_cards]}")
-
-    if not GMAIL_USER or not GMAIL_PASSWORD or not TO_EMAIL:
-        print("Gmail 환경변수 없음 - 발송 건너뜀")
-        return
-
-    send_email(cj_path, hmall_results, lotte_cards)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
