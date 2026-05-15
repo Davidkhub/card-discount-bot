@@ -150,45 +150,46 @@ async def collect_hmall(browser):
         # 페이지 전체 텍스트 수집
         full_text = await page.evaluate("() => document.body.innerText")
         print(f"  텍스트 길이: {len(full_text)}")
-        print(f"  전체 텍스트:\n{full_text}")
 
-        # 오늘 날짜 (예: 2026-05-15)
         today_str = datetime.now().strftime("%Y-%m-%d")
-        print(f"  오늘 날짜: {today_str}")
 
-        # 날짜 패턴으로 블록 분리: "2026-05-15(목)"
-        date_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})\([월화수목금토일]\)')
-        blocks = date_pattern.split(full_text)
-        # blocks: [앞텍스트, 날짜1, 내용1, 날짜2, 내용2, ...]
-
-        today_content = ""
-        for i in range(1, len(blocks) - 1, 2):
-            if blocks[i] == today_str:
-                today_content = blocks[i + 1]
-                break
-
+        # "오늘" 키워드 블록 찾기 (다음 날짜 또는 광고 문구 전까지)
+        today_match = re.search(
+            r'오늘\s*\t+(.*?)(?=\n\d{4}-\d{2}-\d{2}|\n아래 내용|\n이벤트 홈|\Z)',
+            full_text, re.DOTALL
+        )
+        today_content = today_match.group(1) if today_match else ""
         print(f"  오늘 블록: {repr(today_content[:300])}")
 
         cards = []
         if today_content:
             for line in today_content.splitlines():
                 line = line.strip().strip("\t")
-                # "현대카드 5% 할인" 또는 "현대카드(카카오페이) 7% 할인" 패턴
                 m = re.match(r'(.+?)\s+(\d+)\s*%\s*할인', line)
                 if m:
                     card_name = m.group(1).strip()
                     pct       = m.group(2) + "%"
+                    # 조건 줄 찾기 (바로 다음 줄)
+                    detail = ""
+                    idx = today_content.splitlines().index(line) if line in today_content else -1
+                    lines_list = today_content.splitlines()
+                    for k, l in enumerate(lines_list):
+                        if l.strip().strip("\t") == line and k + 1 < len(lines_list):
+                            next_line = lines_list[k + 1].strip()
+                            if next_line and "%" not in next_line and "카드 할인" not in next_line:
+                                detail = next_line
+                            break
                     cards.append({
                         'card_name': card_name,
                         'discount':  f"즉시할인 {pct}",
                         'period':    today_str,
                         'limit':     '',
-                        'details':   [],
+                        'details':   [detail] if detail else [],
                     })
-                    print(f"  카드 파싱: {card_name} / {pct}")
+                    print(f"  카드 파싱: {card_name} / {pct} / {detail}")
 
         if not cards:
-            print("  오늘 날짜 블록 없음 또는 파싱 실패")
+            print("  오늘 블록 없음 또는 파싱 실패")
 
         print(f"  총 {len(cards)}개 카드 수집")
         return cards
