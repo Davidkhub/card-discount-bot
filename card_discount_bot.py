@@ -163,22 +163,18 @@ async def collect_hmall(browser):
 
         cards = []
         if today_content:
-            for line in today_content.splitlines():
-                line = line.strip().strip("\t")
+            lines_list = today_content.splitlines()
+            for k, raw_line in enumerate(lines_list):
+                line = raw_line.strip().strip("\t")
                 m = re.match(r'(.+?)\s+(\d+)\s*%\s*할인', line)
                 if m:
                     card_name = m.group(1).strip()
                     pct       = m.group(2) + "%"
-                    # 조건 줄 찾기 (바로 다음 줄)
                     detail = ""
-                    idx = today_content.splitlines().index(line) if line in today_content else -1
-                    lines_list = today_content.splitlines()
-                    for k, l in enumerate(lines_list):
-                        if l.strip().strip("\t") == line and k + 1 < len(lines_list):
-                            next_line = lines_list[k + 1].strip()
-                            if next_line and "%" not in next_line and "카드 할인" not in next_line:
-                                detail = next_line
-                            break
+                    if k + 1 < len(lines_list):
+                        next_line = lines_list[k + 1].strip()
+                        if next_line and "%" not in next_line and "카드 할인" not in next_line:
+                            detail = next_line
                     cards.append({
                         'card_name': card_name,
                         'discount':  f"즉시할인 {pct}",
