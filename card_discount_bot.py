@@ -122,7 +122,7 @@ async def capture_cj(browser):
 
 
 # ──────────────────────────────────────────────
-# Hmall (텍스트 파싱)
+# Hmall (hmall.it 카드 행사 페이지 파싱)
 # ──────────────────────────────────────────────
 async def collect_hmall(browser):
     page = await browser.new_page(
@@ -147,9 +147,10 @@ async def collect_hmall(browser):
             print("  403 - 수집 불가")
             return []
 
-# 페이지 전체 텍스트 수집
+        # 페이지 전체 텍스트 수집
         full_text = await page.evaluate("() => document.body.innerText")
         print(f"  텍스트 길이: {len(full_text)}")
+        print(f"  전체 텍스트:\n{full_text}")
 
         # 오늘 날짜 (예: 2026-05-15)
         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -158,6 +159,7 @@ async def collect_hmall(browser):
         # 날짜 패턴으로 블록 분리: "2026-05-15(목)"
         date_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})\([월화수목금토일]\)')
         blocks = date_pattern.split(full_text)
+        # blocks: [앞텍스트, 날짜1, 내용1, 날짜2, 내용2, ...]
 
         today_content = ""
         for i in range(1, len(blocks) - 1, 2):
@@ -171,6 +173,7 @@ async def collect_hmall(browser):
         if today_content:
             for line in today_content.splitlines():
                 line = line.strip().strip("\t")
+                # "현대카드 5% 할인" 또는 "현대카드(카카오페이) 7% 할인" 패턴
                 m = re.match(r'(.+?)\s+(\d+)\s*%\s*할인', line)
                 if m:
                     card_name = m.group(1).strip()
