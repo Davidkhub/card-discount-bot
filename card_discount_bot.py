@@ -125,219 +125,95 @@ async def capture_cj(browser):
 # Hmall (텍스트 파싱)
 # ──────────────────────────────────────────────
 async def collect_hmall(browser):
-    context = await browser.new_context(
+    page = await browser.new_page(
         viewport={"width": 390, "height": 844},
         user_agent=MOB_UA,
-        locale="ko-KR",
-        timezone_id="Asia/Seoul",
-        extra_http_headers={
-            "Accept-Language": "ko-KR,ko;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "sec-ch-ua-mobile": "?1",
-            "sec-ch-ua-platform": '"Android"',
-        }
     )
-    await context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
-        Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko'] });
-        window.chrome = { runtime: {} };
-    """)
-
-    page = await context.new_page()
     try:
-        print("[Hmall] 접속 중...")
+        print("[Hmall] 접속 중... (hmall.it/m/?cont=card)")
         os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-        today = datetime.now().strftime("%Y%m%d")
 
-        # 메인 방문으로 쿠키 확보
-        try:
-            await page.goto("https://www.hmall.com/", wait_until="domcontentloaded", timeout=40000)
-        except Exception as e:
-            print(f"  메인 goto 예외 무시: {e}")
-        await asyncio.sleep(3)
-        await page.evaluate("window.scrollTo(0, 500)")
-        await asyncio.sleep(1)
-
-        # 혜택 탭 페이지
         try:
             await page.goto(
-                f"https://www.hmall.com/md/dpl/index?_={datetime.now().strftime('%Y%m%d%H%M%S')}",
-                wait_until="domcontentloaded", timeout=40000
+                "https://hmall.it/m/?cont=card",
+                wait_until="networkidle", timeout=40000,
             )
         except Exception as e:
             print(f"  goto 예외 무시: {e}")
-        await asyncio.sleep(5)
-
-        # 팝업 제거
-        try:
-            el = await page.query_selector("[aria-label='메인 배너 팝업'] button")
-            if el:
-                await el.click(force=True)
-                await asyncio.sleep(1)
-        except Exception:
-            pass
-        await page.evaluate("() => { document.querySelectorAll('[role=\"dialog\"], #modal-root > *').forEach(el => el.remove()); }")
-        await asyncio.sleep(1)
-
-        # 혜택 탭 클릭
-        try:
-            el = await page.query_selector("[data-maindispseq='7']")
-            if el:
-                await el.click(force=True)
-                await asyncio.sleep(4)
-                print("  혜택 탭 클릭 성공")
-        except Exception as e:
-            print(f"  혜택 탭 클릭 실패: {e}")
-
-        await page.evaluate("window.scrollTo(0, 900)")
-        await asyncio.sleep(2)
-
-        # 카드 요소 찾기
-        card_elements = await page.evaluate("""
-            () => {
-                const results = [];
-                document.querySelectorAll('*').forEach(el => {
-                    if (el.innerText?.trim() === '즉시할인') {
-                        let parent = el;
-                        for (let i = 0; i < 10; i++) {
-                            parent = parent.parentElement;
-                            if (!parent) break;
-                            if (window.getComputedStyle(parent).cursor === 'pointer') break;
-                        }
-                        const rect = parent ? parent.getBoundingClientRect() : el.getBoundingClientRect();
-                        results.push({
-                            x: Math.round(rect.left + rect.width / 2),
-                            y: Math.round(rect.top + rect.height / 2),
-                            text: parent?.innerText?.trim().replace(/\s+/g, ' ').slice(0, 40)
-                        });
-                    }
-                });
-                return results;
-            }
-        """)
-
-        if not card_elements:
-            print("  카드 요소 없음")
-            return []
-
-        first = card_elements[0]
-        print(f"  첫 번째 카드 클릭: '{first['text']}'")
-        await page.mouse.click(first['x'], first['y'])
-        await asyncio.sleep(5)
-        print(f"  상세 페이지 URL: {page.url}")
+        await asyncio.sleep(4)
 
         body_start = await page.evaluate("() => document.body.innerText.slice(0, 50)")
         if "403 ERROR" in body_start:
-            print("  상세 페이지 403 - 수집 불가")
+            print("  403 - 수집 불가")
             return []
 
-        # 탭 수집
-        tabs = await page.evaluate("""
-            () => {
-                const results = [];
-                const seen = new Set();
-                document.querySelectorAll('a, button, li, div[role="tab"]').forEach(el => {
-                    const text = el.innerText?.trim().replace(/\s+/g, ' ');
-                    if (text && text.length < 30 && /%/.test(text) && !seen.has(text)) {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            seen.add(text);
-                            results.push({
-                                tag: el.tagName, text,
-                                x: Math.round(rect.left + rect.width / 2),
-                                y: Math.round(rect.top + rect.height / 2),
-                            });
-                        }
-                    }
-                });
-                return results;
-            }
+        lines = await page.evaluate("""
+            () => document.body.innerText
+                .split('\\n')
+                .map(l => l.trim())
+                .filter(l => l.length > 0)
         """)
-        print(f"  탭 {len(tabs)}개: {[t['text'] for t in tabs]}")
-
-        async def extract_card_info(tab_name):
-            """현재 페이지에서 카드 행사 정보 파싱"""
-            lines = await page.evaluate("""
-                () => {
-                    const selectors = [
-                        '.event_cont', '.prmo_cont', '.card_info',
-                        '.benefit_cont', '.dc_info', 'main', '#contents',
-                        '.cont_wrap', '.inner'
-                    ];
-                    let el = null;
-                    for (const sel of selectors) {
-                        el = document.querySelector(sel);
-                        if (el && el.innerText.trim().length > 50) break;
-                    }
-                    if (!el) el = document.body;
-                    return el.innerText
-                        .split('\\n')
-                        .map(l => l.trim())
-                        .filter(l => l.length > 0)
-                        .slice(0, 80);
-                }
-            """)
-
-            parsed = {
-                'card_name': tab_name,
-                'discount': '',
-                'limit': '',
-                'period': '',
-                'details': [],
-            }
-
-            for j, line in enumerate(lines):
-                if re.search(r'\d+%', line) and any(k in line for k in ['즉시', '청구', '할인']):
-                    if not parsed['discount']:
-                        parsed['discount'] = line
-                if any(k in line for k in ['한도', '최대']) and not parsed['limit']:
-                    parsed['limit'] = line
-                if (re.search(r'20\d\d[./]', line) or ('~' in line and re.search(r'\d+\.\d+', line))) and not parsed['period']:
-                    parsed['period'] = line
-                if any(k in line for k in ['이상', '구매', '적용']) and len(line) < 60:
-                    if line not in parsed['details']:
-                        parsed['details'].append(line)
-
-            return parsed
+        print(f"  전체 라인 수: {len(lines)}")
+        print(f"  앞 30줄: {lines[:30]}")
 
         cards = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            pct_match = re.search(r'\d+\s*%', line)
+            if pct_match and any(k in line for k in ['즉시', '청구', '할인', '적립']):
+                card_name = lines[i - 1] if i > 0 else ''
+                discount  = line
+                period    = ''
+                limit     = ''
+                details   = []
+                j = i + 1
+                while j < len(lines) and j < i + 6:
+                    l = lines[j]
+                    if re.search(r'20\d\d[./]', l) or ('~' in l and re.search(r'\d+\.\d+', l)):
+                        period = l
+                    elif '한도' in l or '최대' in l:
+                        limit = l
+                    elif any(k in l for k in ['이상', '구매', '적용']) and len(l) < 60:
+                        details.append(l)
+                    elif re.search(r'\d+\s*%', l) and any(k in l for k in ['즉시', '청구', '할인', '적립']):
+                        break
+                    j += 1
 
-        if len(tabs) == 0:
-            info = await extract_card_info(first['text'].replace('즉시할인', '').strip())
-            cards.append(info)
-            print(f"  단일 카드 수집: {info['card_name']} / {info['discount']}")
-            return cards
+                if card_name and not re.search(r'\d+\s*%', card_name):
+                    cards.append({
+                        'card_name': card_name,
+                        'discount':  discount,
+                        'period':    period,
+                        'limit':     limit,
+                        'details':   details,
+                    })
+                    print(f"  카드 파싱: {card_name} / {discount} / {period}")
+            i += 1
 
-        for i, tab in enumerate(tabs):
-            print(f"  [{i+1}/{len(tabs)}] 탭 클릭: '{tab['text']}'")
-            try:
-                await page.evaluate(f"""
-                    () => {{
-                        const tabs = [...document.querySelectorAll('a, button, li, div[role="tab"]')]
-                            .filter(el => {{
-                                const text = el.innerText?.trim().replace(/\s+/g, ' ');
-                                return text && text.length < 30 && /%/.test(text);
-                            }});
-                        if (tabs[{i}]) tabs[{i}].scrollIntoView({{block: 'center', inline: 'center'}});
-                        if (tabs[{i}]) tabs[{i}].click();
-                    }}
-                """)
-                await asyncio.sleep(3)
+        if not cards:
+            print("  1차 파싱 실패 → 할인율 기준 재파싱")
+            for i, line in enumerate(lines):
+                m = re.search(r'(\d+)\s*%', line)
+                if m and int(m.group(1)) in range(3, 20):
+                    card_name = lines[i - 1] if i > 0 else line
+                    if len(card_name) < 30 and not re.search(r'\d+\s*%', card_name):
+                        period = ''
+                        for k in range(i + 1, min(i + 5, len(lines))):
+                            if re.search(r'20\d\d[./]', lines[k]) or '~' in lines[k]:
+                                period = lines[k]
+                                break
+                        if not any(c['card_name'] == card_name for c in cards):
+                            cards.append({
+                                'card_name': card_name,
+                                'discount':  line,
+                                'period':    period,
+                                'limit':     '',
+                                'details':   [],
+                            })
+                            print(f"  재파싱: {card_name} / {line}")
 
-                body_check = await page.evaluate("() => document.body.innerText.slice(0, 50)")
-                if "403 ERROR" in body_check:
-                    print(f"    403 감지 - 건너뜀")
-                    continue
-
-                info = await extract_card_info(tab['text'])
-                cards.append(info)
-                print(f"    수집 완료: {info['card_name']} / {info['discount']} / {info['period']}")
-
-            except Exception as e:
-                print(f"    오류: {e}")
-                import traceback; traceback.print_exc()
-
+        print(f"  총 {len(cards)}개 카드 수집")
         return cards
 
     except Exception as e:
@@ -346,7 +222,6 @@ async def collect_hmall(browser):
         return []
     finally:
         await page.close()
-        await context.close()
 
 
 # ──────────────────────────────────────────────
