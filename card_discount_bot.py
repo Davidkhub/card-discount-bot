@@ -147,71 +147,45 @@ async def collect_hmall(browser):
             print("  403 - 수집 불가")
             return []
 
-        lines = await page.evaluate("""
-            () => document.body.innerText
-                .split('\\n')
-                .map(l => l.trim())
-                .filter(l => l.length > 0)
-        """)
-        print(f"  전체 라인 수: {len(lines)}")
-        print(f"  앞 30줄: {lines[:30]}")
+# 페이지 전체 텍스트 수집
+        full_text = await page.evaluate("() => document.body.innerText")
+        print(f"  텍스트 길이: {len(full_text)}")
+
+        # 오늘 날짜 (예: 2026-05-15)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        print(f"  오늘 날짜: {today_str}")
+
+        # 날짜 패턴으로 블록 분리: "2026-05-15(목)"
+        date_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})\([월화수목금토일]\)')
+        blocks = date_pattern.split(full_text)
+
+        today_content = ""
+        for i in range(1, len(blocks) - 1, 2):
+            if blocks[i] == today_str:
+                today_content = blocks[i + 1]
+                break
+
+        print(f"  오늘 블록: {repr(today_content[:300])}")
 
         cards = []
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            pct_match = re.search(r'\d+\s*%', line)
-            if pct_match and any(k in line for k in ['즉시', '청구', '할인', '적립']):
-                card_name = lines[i - 1] if i > 0 else ''
-                discount  = line
-                period    = ''
-                limit     = ''
-                details   = []
-                j = i + 1
-                while j < len(lines) and j < i + 6:
-                    l = lines[j]
-                    if re.search(r'20\d\d[./]', l) or ('~' in l and re.search(r'\d+\.\d+', l)):
-                        period = l
-                    elif '한도' in l or '최대' in l:
-                        limit = l
-                    elif any(k in l for k in ['이상', '구매', '적용']) and len(l) < 60:
-                        details.append(l)
-                    elif re.search(r'\d+\s*%', l) and any(k in l for k in ['즉시', '청구', '할인', '적립']):
-                        break
-                    j += 1
-
-                if card_name and not re.search(r'\d+\s*%', card_name):
+        if today_content:
+            for line in today_content.splitlines():
+                line = line.strip().strip("\t")
+                m = re.match(r'(.+?)\s+(\d+)\s*%\s*할인', line)
+                if m:
+                    card_name = m.group(1).strip()
+                    pct       = m.group(2) + "%"
                     cards.append({
                         'card_name': card_name,
-                        'discount':  discount,
-                        'period':    period,
-                        'limit':     limit,
-                        'details':   details,
+                        'discount':  f"즉시할인 {pct}",
+                        'period':    today_str,
+                        'limit':     '',
+                        'details':   [],
                     })
-                    print(f"  카드 파싱: {card_name} / {discount} / {period}")
-            i += 1
+                    print(f"  카드 파싱: {card_name} / {pct}")
 
         if not cards:
-            print("  1차 파싱 실패 → 할인율 기준 재파싱")
-            for i, line in enumerate(lines):
-                m = re.search(r'(\d+)\s*%', line)
-                if m and int(m.group(1)) in range(3, 20):
-                    card_name = lines[i - 1] if i > 0 else line
-                    if len(card_name) < 30 and not re.search(r'\d+\s*%', card_name):
-                        period = ''
-                        for k in range(i + 1, min(i + 5, len(lines))):
-                            if re.search(r'20\d\d[./]', lines[k]) or '~' in lines[k]:
-                                period = lines[k]
-                                break
-                        if not any(c['card_name'] == card_name for c in cards):
-                            cards.append({
-                                'card_name': card_name,
-                                'discount':  line,
-                                'period':    period,
-                                'limit':     '',
-                                'details':   [],
-                            })
-                            print(f"  재파싱: {card_name} / {line}")
+            print("  오늘 날짜 블록 없음 또는 파싱 실패")
 
         print(f"  총 {len(cards)}개 카드 수집")
         return cards
