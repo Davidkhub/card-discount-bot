@@ -65,6 +65,46 @@ async def capture_cj(browser):
         bottom_scroll = doc_height - VIEWPORT_H
         print(f"  맨 아래 scrollY: {bottom_scroll}, 문서 총 높이: {doc_height}")
 
+        # ── [디버그] 카드 영역 DOM 구조 덤프 ──
+        debug_cards = await page.evaluate("""
+            () => {
+                // 할인율(%)을 가진 카드 블록 후보 찾기
+                const out = [];
+                document.querySelectorAll('*').forEach(el => {
+                    const t = el.innerText?.trim() || '';
+                    // "토스페이 7%", "삼성카드 5%" 같은 카드 제목 패턴
+                    if (/^[가-힣A-Za-z()]+\\s*\\d+\\s*%$/.test(t.replace(/\\n/g,' ').trim())) {
+                        // 카드 전체를 감싸는 컨테이너로 올라가기
+                        let p = el;
+                        for (let i = 0; i < 6; i++) {
+                            if (!p.parentElement) break;
+                            p = p.parentElement;
+                            const pt = p.innerText?.trim() || '';
+                            if (pt.includes('이상') || pt.includes('행사상품') || pt.includes('결제') || pt.includes('할인')) {
+                                out.push({
+                                    title: t.replace(/\\n/g,' ').trim(),
+                                    tag: p.tagName,
+                                    cls: p.className,
+                                    full: pt.replace(/\\n/g, ' | ').slice(0, 120)
+                                });
+                                break;
+                            }
+                        }
+                    }
+                });
+                // 중복 제거
+                const seen = new Set();
+                return out.filter(o => {
+                    if (seen.has(o.title)) return false;
+                    seen.add(o.title);
+                    return true;
+                });
+            }
+        """)
+        print(f"  [디버그] 카드 후보 {len(debug_cards)}개:")
+        for c in debug_cards:
+            print(f"    - {c['title']} | tag={c['tag']} cls={c['cls'][:40]} | {c['full']}")
+
         # 캡처 범위: 맨 아래에서 750px 올라간 지점부터 위로 2800px
         cap_bottom = doc_height - 750
         cap_top    = max(0, cap_bottom - 2800)
